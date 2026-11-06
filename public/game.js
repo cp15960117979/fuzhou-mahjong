@@ -138,6 +138,67 @@ function renderWaiting(){
 
 // ---------- 换牌面板 ----------
 function suitLabel(s){ return {m:'万', s:'条', p:'筒'}[s] || s; }
+
+// 骰子：3x3 点阵，1-6 点按真实骰面排布
+const DICE_PIPS = {
+  1:[[1,1]],
+  2:[[0,0],[2,2]],
+  3:[[0,0],[1,1],[2,2]],
+  4:[[0,0],[0,2],[2,0],[2,2]],
+  5:[[0,0],[0,2],[1,1],[2,0],[2,2]],
+  6:[[0,0],[0,1],[0,2],[2,0],[2,1],[2,2]],
+};
+let diePlayedId = -1, dieTimers = [];
+function dieEl(n, rolling){
+  const d=document.createElement('div');
+  d.className='die'+(rolling?' rolling':'');
+  DICE_PIPS[n].forEach(([r,c])=>{
+    const i=document.createElement('i');
+    i.style.gridArea=`${r+1}/${c+1}`;
+    i.className='on';
+    d.appendChild(i);
+  });
+  return d;
+}
+function paintDice(box, a, b, rolling){
+  box.innerHTML='';
+  box.appendChild(dieEl(a, rolling));
+  box.appendChild(dieEl(b, rolling));
+}
+// 摇骰动画：滚 0.9 秒左右再定格，顺便把"这次给谁"讲清楚
+function playSwapDice(sw){
+  const box=document.getElementById('swapDice');
+  const txt=document.getElementById('swapDiceText');
+  if(!box || !txt) return;
+  const fin = (Array.isArray(sw.dice) && sw.dice.length===2) ? sw.dice : [3,3];
+  if(diePlayedId===sw.id){ paintDice(box, fin[0], fin[1], false); return; }
+  diePlayedId=sw.id;
+  dieTimers.forEach(clearTimeout); dieTimers=[];
+  box.classList.add('rolling');
+  txt.className='swap-dice-text rolling';
+  txt.textContent='摇骰子…';
+  let n=0;
+  const tick=()=>{
+    paintDice(box, 1+Math.floor(Math.random()*6), 1+Math.floor(Math.random()*6), true);
+    if(++n<9) dieTimers.push(setTimeout(tick, 95+n*10));
+    else {
+      paintDice(box, fin[0], fin[1], false);
+      box.classList.remove('rolling');
+      txt.className='swap-dice-text done';
+      txt.innerHTML=`摇出 <b>${fin[0]} + ${fin[1]} = ${sw.diceSum}</b> 点 · <b>${sw.dirText||''}</b>`;
+      if(sw.giveTo){
+        const line=document.createElement('div');
+        line.className='swap-give';
+        line.appendChild(document.createTextNode('你 → '));
+        const rel=document.createElement('b'); rel.textContent=sw.giveTo.rel; line.appendChild(rel);
+        if(sw.giveTo.name) line.appendChild(document.createTextNode(`（${sw.giveTo.name}）`));
+        txt.appendChild(line);
+      }
+    }
+  };
+  tick();
+}
+
 function renderSwap(){
   const desc=document.getElementById('swapDesc');
   const suitsBox=document.getElementById('swapSuits');
@@ -146,6 +207,8 @@ function renderSwap(){
   const wait=document.getElementById('swapWait');
   suitsBox.innerHTML=''; selectBox.innerHTML=''; choicesBox.innerHTML='';
   if(!state.swap){ desc.textContent='准备换牌…'; wait.textContent=''; return; }
+  // 摇骰动画（每个 swap.id 只播一次；重摇会换 id，重新播）
+  playSwapDice(state.swap);
   // 服务端每次换牌/重摇都会换 id：id 变了说明是新的一轮，必须清掉上一轮的本地状态
   if (curSwapId !== state.swap.id) {
     curSwapId = state.swap.id; swapSuit = null; swapSelection = []; swapSubmitted = false; swapSubmitAt = 0;
@@ -158,7 +221,7 @@ function renderSwap(){
   const picked = swapSuit || state.swap.yourChoice;
 
   if(!picked){
-    desc.textContent = `每人摇出 ${state.swap.diceSum} 点 → ${state.swap.dirText}。先选一个花色，再从该花色里挑 3 张换出；若四家给出花色一致则重摇。`;
+    desc.textContent = '每人从手里挑 3 张同花色换出（庄家 17 张、其余三家 16 张）；若四家给出花色一致则重摇。';
     if(canChoose){
       wait.textContent='第一步：选择要换出的花色（不足 3 张的花色不可选）';
       const selfHand = (state.players.find(p=>p.seat===state.selfSeat)||{}).hand || [];
@@ -528,9 +591,39 @@ function renderActions(){
   // 碰/杠优先：自己已经申请吃，正在等碰家表态
   if(state.pending && state.pending.chiWait === state.selfSeat){
     const tip=document.createElement('span'); tip.className='act-tip';
-    const who = (state.pending.pengWait||[]).map(s=>nameOf(s)).join('、');
-    tip.textContent = who ? `你已申请吃，等 ${who} 决定碰不碰（碰优先）…` : '你已申请吃，等碰家表态…';
+    const qjw = (state.pending.qjWait||[]).filter(s=>s!==state.selfSeat).map(s=>nameOf(s));
+    const who = qjw.length ? qjw : (state.pending.pengWait||[]).map(s=>nameOf(s));
+    const why = qjw.length ? '抢不抢金（抢金优先）' : '碰不碰（碰优先）';
+    tip.textContent = who.length ? `你已申请吃，等 ${who.join('、')} 决定${why}…` : '你已申请吃，等其他人表态…';
     box.appendChild(tip);
+  }
+  // 胡 > 碰/杠：自己先点了碰/杠，也要等能胡的家明确放弃才生效
+  if(state.pending && state.pending.pengIntent === state.selfSeat){
+    const who = (state.pending.huWait||[]).map(s=>nameOf(s)).join('、');
+    const tip=document.createElement('span'); tip.className='act-tip act-warn';
+    const why = state.pending.qiangjin ? '抢不抢金' : '胡不胡';
+    tip.textContent = who
+      ? `你已申请碰/杠，等 ${who} 先决定${why}（对方要了就没你的份）…`
+      : '你已申请碰/杠，等其他人表态…';
+    box.appendChild(tip);
+  }
+  // 抢金优先：抢金窗口里，别家的吃/碰/杠必须等能抢金的家点过才生效
+  if(state.pending && state.pending.qiangjin && state.pending.kind!=='qianggang'){
+    const qjWait = state.pending.qjWait||[];
+    const iAmQj = !!(self && self.huInfo && self.huInfo.kind==='qiangjin');
+    const hasCPG = acts.includes('peng') || acts.includes('gang') || acts.some(a=>a&&a.act==='chi');
+    if(iAmQj && qjWait.includes(state.selfSeat)){
+      const others = qjWait.filter(s=>s!==state.selfSeat);
+      const tip=document.createElement('span'); tip.className='act-tip act-hu-tip';
+      tip.textContent = others.length
+        ? `抢金窗口：${others.map(s=>nameOf(s)).join('、')} 也能抢；全部点过后别家才能吃碰`
+        : '抢金窗口：点「过」就放弃抢金，别家才能吃碰';
+      box.appendChild(tip);
+    } else if(hasCPG && qjWait.length){
+      const tip=document.createElement('span'); tip.className='act-tip act-warn';
+      tip.textContent = `抢金优先：等 ${qjWait.map(s=>nameOf(s)).join('、')} 决定抢不抢金，你的吃/碰/杠才生效`;
+      box.appendChild(tip);
+    }
   }
   const huBtn = acts.includes('hu');
   const isSelfHu = !!state.selfCanHu;
@@ -556,6 +649,14 @@ function renderActions(){
   } else if(huBtn && huLabel){
     const tip=document.createElement('span'); tip.className='act-tip act-hu-tip';
     tip.textContent = isQG ? `这手是 ${huLabel}，可以抢杠胡` : (isSelfHu ? `现在就能胡：${huLabel}` : `这手是 ${huLabel}，可以点炮胡`);
+    box.appendChild(tip);
+  }
+  // 有人抢着碰/杠，但胡优先：提醒胡家别慌，点「胡」就是你的
+  if(huBtn && state.pending && state.pending.pengIntent != null && state.pending.pengIntent !== state.selfSeat){
+    const tip=document.createElement('span'); tip.className='act-tip act-hu-tip';
+    tip.textContent = state.pending.qiangjin
+      ? `${nameOf(state.pending.pengIntent)} 已经想碰/杠，但抢金优先：点「抢金」就归你，点「过」才轮到他`
+      : `${nameOf(state.pending.pengIntent)} 已经想碰/杠，但胡优先：点「胡」就归你，点「过」才轮到他`;
     box.appendChild(tip);
   }
   // 抢杠：别人加杠，只有"有奖励的大牌"能抢；小胡不能抢

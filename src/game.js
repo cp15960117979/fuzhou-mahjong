@@ -19,7 +19,7 @@ const SWAP_TIMEOUT_MS = Number((typeof process !== 'undefined' && process.env &&
 
 function suitName(s) { return { m: '万', s: '条', p: '筒' }[s] || s; }
 function dirText(dir) {
-  return { cw: '顺时针(给上家)', ccw: '逆时针(给下家)', pair: '庄↔对、上↔下互换' }[dir] || dir;
+  return { cw: '顺时针 · 每人给上家', ccw: '逆时针 · 每人给下家', pair: '对家互换 · 每人给对家' }[dir] || dir;
 }
 
 class Room {
@@ -212,8 +212,11 @@ class Room {
     const order = [(this.dealer + 1) % n, (this.dealer + 2) % n, (this.dealer + 3) % n, this.dealer];
     for (const p of this.players) { p.hand = []; p.melds = []; p.discards = []; p.flowerCount = 0; p.eatPongCount = 0; p.providers = []; p.declaredTing = false; p.jinKan = false; p.lastDrawn = -1; }
     for (let r = 0; r < 4; r++) for (const s of order) this.players[s].hand.push(...this.wall.splice(0, 4));
-    // 16 张制：四家都是 16 张，庄家的第 17 张由 openJokerAndStart() 的首次摸牌给出
-    //   （以前这里多补了 1 张，导致庄家全程 17 张、摸牌后 18 张，永远凑不成 17 张的胡牌型）
+    // 庄家多 1 张：发完 16 张后庄家再拿 1 张 = 17 张。
+    //   换牌阶段就是从这 17 张里挑 3 张换出（换回 3 张仍是 17 张），
+    //   换完直接出牌，开金后不再额外摸一张。
+    this.players[this.dealer].hand.push(this.wall.shift());
+    this.turn = this.dealer; // 换牌/开金之后第一个出牌的就是庄家
     this.joker = -1;
     this.lastDiscard = null;
     this.pending = null;
@@ -256,15 +259,18 @@ class Room {
   // 第二次摇骰 → 换牌方向（5/9 重摇）
   computeSwapDice() {
     for (let attempt = 0; attempt < 30; attempt++) {
-      const sum = roll2();
+      const d1 = 1 + Math.floor(Math.random() * 6);
+      const d2 = 1 + Math.floor(Math.random() * 6);
+      const sum = d1 + d2;
       if (sum === 5 || sum === 9) continue; // 重摇
       let dir;
       if (sum === 3 || sum === 7 || sum === 11) dir = 'pair';
       else if (sum === 2 || sum === 6 || sum === 10) dir = 'ccw';
       else dir = 'cw'; // 4/8/12
-      this.swap = { id: ++this.swapSeq, diceSum: sum, dir, choices: {}, picks: {} };
+      // dice 两颗点数单独下发，前端按真实骰面播动画（和值仍是 diceSum）
+      this.swap = { id: ++this.swapSeq, diceSum: sum, dice: [d1, d2], dir, choices: {}, picks: {} };
       this.phase = 'swap';
-      this.log.push(`换牌：摇出 ${sum} 点 → ${dirText(dir)}`);
+      this.log.push(`换牌：摇出 ${d1} + ${d2} = ${sum} 点 → ${dirText(dir)}`);
       this.armSwapTimeout();
       return;
     }
@@ -306,6 +312,24 @@ class Room {
     return (this.dealer + 1) % this.players.length; // 上家
   }
 
+  // 本次换牌，座位上这个人把 3 张牌给谁：{ seat, rel:'上家'|'下家'|'对家', name }
+  swapGiveTo(seat) {
+    if (!this.swap) return null;
+    const dir = this.swap.dir;
+    const target = this.swapTargetOf(seat);
+    const rel = dir === 'cw' ? '上家' : dir === 'ccw' ? '下家' : '对家';
+    const p = this.getPlayer(target);
+    return { seat: target, rel, name: p ? p.name : '' };
+  }
+
+  swapTargetOf(seat) {
+    const n = this.players.length;
+    const dir = this.swap.dir;
+    if (dir === 'cw') return (seat - 1 + n) % n;   // 顺时针：给上家
+    if (dir === 'ccw') return (seat + 1) % n;      // 逆时针：给下家
+    return (seat + 2) % n;                         // 对家互换
+  }
+
   // 玩家各自选换出花色（每人 3 张）。集齐 4 人后执行环交换
   doSwap(seat, suit, tiles) {
     if (this.phase !== 'swap' || !this.swap) return { ok: false, msg: '非换牌阶段' };
@@ -336,7 +360,7 @@ class Room {
     const n = this.players.length;
     const dir = this.swap.dir;
     const givens = this.swap.choices;
-    const giveTo = (s) => dir === 'cw' ? (s - 1 + n) % n : dir === 'ccw' ? (s + 1) % n : this.pairOf(s);
+    const giveTo = (s) => this.swapTargetOf(s);
     // 取 3 张并交换
     const taken = {};
     for (const p of this.players) {
@@ -396,7 +420,15 @@ class Room {
     this.phase = 'playing';
     this.opening = true; // 抢金窗口
     this.log.push(`金: ${MJ.TILE_NAMES[this.joker]}（公共展示1张，场下3张百搭）`);
-    this.drawCurrent();
+    // 庄家开局就是 17 张（发牌时就多拿 1 张，换牌从 17 张里挑 3 张），
+    //   所以这里**不再摸牌**，直接轮到庄家出牌；天胡就在这一刻判定。
+    this.turn = this.dealer;
+    this.pending = null;
+    this.lastDiscard = null;
+    const dp = this.getPlayer(this.dealer);
+    dp.lastDrawn = -1; // 17 张里没有"刚摸的那张"，不需要单独摆出来
+    this.selfCanHu = this.checkWinOf(dp).win;
+    this.broadcast();
   }
 
   drawCurrent() {
@@ -499,6 +531,9 @@ class Room {
     this.pending = {
       by: bySeat, tile, qiangjin, seats: seats.map((s) => s.seat), acts: seats,
       responded: new Set(), huList: [], claimed: false,
+      // 抢金窗口里真正能抢金的家：吃/碰/杠必须等这几家全部明确"过"了才生效
+      qjSeats: qiangjin ? seats.filter((x) => x.acts.includes('hu') && this.canQiangjin(this.getPlayer(x.seat)))
+        .map((x) => x.seat) : [],
       // 小胡提示只对"点炮这张牌"成立；能抢金的玩家不算小胡（抢金本身是大牌）
       xiaoHu: seats.filter((x) => {
         const pl = this.getPlayer(x.seat);
@@ -644,6 +679,30 @@ class Room {
   }
 
   // ---------- 响应 ----------
+  // 还有哪些"优先级更高"的家没表态：
+  //   includePeng=false → 只看能胡的（碰/杠要等胡）
+  //   includePeng=true  → 看能胡的 + 能碰/杠的（吃要等胡和碰杠）
+  // 同级的其他碰家不算"更高"，先点先得，不必互相等。
+  higherWaiters(pend, seat, includePeng) {
+    const out = [];
+    for (const sd of pend.seats) {
+      if (sd === seat || pend.responded.has(sd)) continue;
+      const entry = (pend.acts || []).find((a) => a.seat === sd);
+      const acts = (entry && entry.acts) || [];
+      if (acts.includes('hu')) { out.push(sd); continue; }
+      if (includePeng && acts.some((x) => x === 'peng' || x === 'gang')) out.push(sd);
+    }
+    return out;
+  }
+
+  // 抢金窗口专属：还有哪些"能抢金"的家没表态。
+  //   抢金是大牌且只在开局这一手存在 → 吃/碰/杠必须等这几家全部点过才允许生效，
+  //   不跟"谁先点"抢，也不因为自己是碰家就插队。
+  qjWaiters(pend, exceptSeat) {
+    if (!pend || !pend.qiangjin || pend.kind === 'qianggang') return [];
+    return (pend.qjSeats || []).filter((sd) => sd !== exceptSeat && !pend.responded.has(sd));
+  }
+
   claim(seat, action, payload) {
     if (!this.pending) return { ok: false, msg: '当前无可响应操作' };
     const pend = this.pending;
@@ -668,18 +727,23 @@ class Room {
       }
     }
     else if (action === 'chi') {
-      // 吃是最低优先级：被胡/被碰抢先，或金不能吃 → 视为放弃
-      if (pend.huList.length > 0 || pend.claimed || pend.tile === this.joker) {
+      // 吃是最低优先级：胡 > 碰/杠 > 吃。只要有更高优先级的家还没表态，就先把吃挂起，
+      //   等他们全部明确"过"了才真正吃；有人胡/碰则吃作废。
+      if (pend.huList.length > 0 || pend.pengIntent || pend.tile === this.joker) {
         pend.responded.add(seat);
+      } else if (this.qjWaiters(pend, seat).length > 0) {
+        // 抢金窗口：能抢金的家还没表态，吃先挂着
+        const names = this.qjWaiters(pend, seat).map((sd) => this.getPlayer(sd).name).join('、');
+        pend.chiIntent = { seat, combo: payload && payload.combo };
+        pend.responded.add(seat);
+        this.log.push(`${this.getPlayer(seat).name} 想吃 ${MJ.TILE_NAMES[pend.tile]}，等 ${names} 先决定抢不抢金（抢金优先）`);
       } else {
-        // 碰/杠 > 吃：还有碰家没表态，先把吃牌意向挂起，等他们全部"过"了再自动吃
-        const waitingPeng = pend.acts.filter((a) => a.seat !== seat && !pend.responded.has(a.seat) &&
-          a.acts.some((x) => x === 'peng' || x === 'gang'));
-        if (waitingPeng.length > 0) {
+        const waitHigher = this.higherWaiters(pend, seat, true);
+        if (waitHigher.length > 0) {
           pend.chiIntent = { seat, combo: payload && payload.combo };
           pend.responded.add(seat);
-          const names = waitingPeng.map((a) => this.getPlayer(a.seat).name).join('、');
-          this.log.push(`${this.getPlayer(seat).name} 想吃 ${MJ.TILE_NAMES[pend.tile]}，等 ${names} 先决定碰不碰`);
+          const names = waitHigher.map((sd) => this.getPlayer(sd).name).join('、');
+          this.log.push(`${this.getPlayer(seat).name} 想吃 ${MJ.TILE_NAMES[pend.tile]}，等 ${names} 先决定胡不胡/碰不碰`);
         } else {
           const r = this.doChi(seat, pend.tile, pend.by, payload && payload.combo);
           if (!(r && r.ok === false)) return r || { ok: true };
@@ -688,16 +752,32 @@ class Room {
       }
     }
     else if (action === 'peng' || action === 'gang') {
-      if (pend.huList.length > 0 || pend.claimed) {
+      if (pend.huList.length > 0 || pend.pengIntent) {
         pend.responded.add(seat);
+      } else if (this.qjWaiters(pend, seat).length > 0) {
+        // 抢金窗口：先挂起，等能抢金的家都点过才成立
+        const names = this.qjWaiters(pend, seat).map((sd) => this.getPlayer(sd).name).join('、');
+        pend.pengIntent = { seat, action, tile: pend.tile };
+        pend.responded.add(seat);
+        this.log.push(`${this.getPlayer(seat).name} 想${action === 'peng' ? '碰' : '杠'} ${MJ.TILE_NAMES[pend.tile]}，等 ${names} 先决定抢不抢金（抢金优先）`);
       } else {
-        if (pend.chiIntent) {
-          this.log.push(`碰优先：${this.getPlayer(pend.chiIntent.seat).name} 的吃被取消`);
-          pend.chiIntent = null;
+        // 胡 > 碰/杠：能点炮胡的家还没表态时，碰/杠先挂起。
+        //   哪怕自己先点了碰，只要有人随后喊胡，碰就作废（这是牌桌常识，也是这次要修的地方）。
+        const waitHu = this.higherWaiters(pend, seat, false);
+        if (waitHu.length > 0) {
+          pend.pengIntent = { seat, action, tile: pend.tile };
+          pend.responded.add(seat);
+          const names = waitHu.map((sd) => this.getPlayer(sd).name).join('、');
+          this.log.push(`${this.getPlayer(seat).name} 想${action === 'peng' ? '碰' : '杠'} ${MJ.TILE_NAMES[pend.tile]}，等 ${names} 先决定胡不胡（胡优先）`);
+        } else {
+          if (pend.chiIntent) {
+            this.log.push(`碰优先：${this.getPlayer(pend.chiIntent.seat).name} 的吃被取消`);
+            pend.chiIntent = null;
+          }
+          const r = action === 'peng' ? this.doPeng(seat, pend.tile, pend.by) : this.doGang(seat, pend.tile, pend.by);
+          if (r && r.ok === false) pend.responded.add(seat);
+          else return r || { ok: true };
         }
-        const r = action === 'peng' ? this.doPeng(seat, pend.tile, pend.by) : this.doGang(seat, pend.tile, pend.by);
-        if (r && r.ok === false) pend.responded.add(seat);
-        else return r || { ok: true };
       }
     }
 
@@ -727,22 +807,42 @@ class Room {
       return;
     }
     const qjWindow = !!pend.qiangjin;
-    if (this.opening && pend.claimed) this.opening = false; // 有人吃碰庄首张 → 关闭抢金窗口
+    if (this.opening) this.opening = false; // 有人响应庄家首张 → 抢金窗口到此为止
+    // ① 胡最大：只要有人喊胡，吃碰杠全部作废（哪怕碰家先点了）
     if (pend.huList.length > 0) {
       const winnerSeat = this.resolveMultipleHu(pend.huList, pend.by, qjWindow);
       // 抢金只认"把公示金加进来能胡"的那家；胡牌张就是公示金，不是庄家打出的弃牌
       const winnerQj = qjWindow && this.canQiangjin(this.getPlayer(winnerSeat));
       this.doHu(winnerSeat, false, pend.by, winnerQj ? { qiangjin: true, tile: this.joker } : {});
-    } else if (pend.claimed || this.pending === null) {
-      // 已被碰/杠抢先，吃牌意向作废
       return;
-    } else if (pend.chiIntent) {
-      // 碰/杠的家全部过了 → 轮到吃家
+    }
+    // ② 没人胡（都明确过了）→ 才轮到碰/杠
+    if (pend.pengIntent) {
+      const it = pend.pengIntent;
+      if (qjWindow && (pend.qjSeats || []).length) {
+        const who = pend.qjSeats.map((sd) => this.getPlayer(sd).name).join('、');
+        this.log.push(`${who} 放弃抢金 → ${this.getPlayer(it.seat).name} 的${it.action === 'gang' ? '杠' : '碰'}现在生效`);
+      }
+      this.pending = null;
+      // doPeng/doGang 成功时返回 undefined（内部已广播），失败才返回 {ok:false}
+      const r = it.action === 'gang'
+        ? this.doGang(it.seat, pend.tile, pend.by)
+        : this.doPeng(it.seat, pend.tile, pend.by);
+      if (r && r.ok === false) this.nextTurn();
+      return;
+    }
+    // ③ 碰/杠也没有 → 最后才是吃
+    if (pend.chiIntent) {
+      if (qjWindow && (pend.qjSeats || []).length) {
+        const who = pend.qjSeats.map((sd) => this.getPlayer(sd).name).join('、');
+        this.log.push(`${who} 放弃抢金 → ${this.getPlayer(pend.chiIntent.seat).name} 的吃现在生效`);
+      }
+      this.pending = null;
       const r = this.doChi(pend.chiIntent.seat, pend.tile, pend.by, pend.chiIntent.combo);
       if (!r || r.ok === false) this.nextTurn();
-    } else {
-      this.nextTurn();
+      return;
     }
+    this.nextTurn();
   }
 
   recordEatPong(p, fromSeat) {
@@ -1423,12 +1523,21 @@ class Room {
         kind: this.pending.kind || null,
         qiangjin: !!this.pending.qiangjin,
         chiWait: this.pending.chiIntent ? this.pending.chiIntent.seat : null,
+        pengIntent: this.pending.pengIntent ? this.pending.pengIntent.seat : null,
+        // 还在等谁表态胡（前端据此提示"等 XX 决定胡不胡"）
+        huWait: this.pending.seats.filter((sd) => !this.pending.responded.has(sd) &&
+          (this.pending.acts || []).some((a) => a.seat === sd && a.acts.includes('hu'))),
+        // 抢金窗口里还没决定抢不抢的家（吃碰杠要等这几家）
+        qjWait: (this.pending.qjSeats || []).filter((sd) => !this.pending.responded.has(sd)),
         xiaoHu: this.pending.xiaoHu || [],
         pengWait: this.pending.seats.filter((sd) => !this.pending.responded.has(sd) &&
           (this.pending.acts || []).some((a) => a.seat === sd && a.acts.some((x) => x === 'peng' || x === 'gang'))),
       } : null,
       swap: (this.phase === 'swap' && this.swap) ? {
-        id: this.swap.id, diceSum: this.swap.diceSum, dir: this.swap.dir, dirText: dirText(this.swap.dir),
+        id: this.swap.id, diceSum: this.swap.diceSum, dice: this.swap.dice || null,
+        dir: this.swap.dir, dirText: dirText(this.swap.dir),
+        // 自己这次把牌给谁（相对方位 + 名字），前端直接显示"你 → 上家（张三）"
+        giveTo: this.swapGiveTo(forSeat),
         // 只下发"谁已经选好了"，不下发别人选的花色（自己的 yourChoice 除外）
         chosen: this.players.map((pl) => this.swap.choices[pl.seat] != null),
         yourChoice: this.swap.choices[forSeat] != null ? this.swap.choices[forSeat] : null,

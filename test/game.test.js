@@ -286,7 +286,7 @@ function genSanJinDaoOthers(J) {
     assert.strictEqual(sum + inHand + inWall, 36, `花牌总数应为 36，实=${sum + inHand + inWall}`);
     assert.strictEqual(inHand, 0, '补花后手里不应残留花牌');
     const hands = r.players.reduce((s, p) => s + p.hand.length, 0);
-    assert.strictEqual(hands, 64, '四家手牌共 64 张');
+    assert.strictEqual(hands, 65, '四家手牌共 65 张（庄家发牌就多 1 张）');
   }
   console.log('✓ 补花：每张花只计一朵（四家花数 + 墙里 = 36）');
 })();

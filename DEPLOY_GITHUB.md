@@ -45,7 +45,7 @@ cd 你的路径/fuzhou-mahjong-github
 ```bash
 git init
 git add .
-git commit -m "福麻大乱斗 v7"
+git commit -m "福麻大乱斗 v10"
 git branch -M main
 git remote add origin https://github.com/你的用户名/fuzhou-mahjong.git
 git push -u origin main
@@ -158,7 +158,7 @@ https://fuzhou-mahjong-xxxx.onrender.com
 
 改完代码后：
 
-1. 把 `VERSION` 里的版本号 +1（现在是 `v7` → 改成 `v8`）。
+1. 把 `VERSION` 里的版本号 +1（现在是 `v10` → 改成 `v11`）。
 2. 重新生成单机版：`python3 build-single.py`。
 3. 用新生成的 `福麻大乱斗学习模拟器-v7.html` 覆盖 `docs/index.html`。
 4. 提交推送：
@@ -199,7 +199,7 @@ Free 实例不需要付费，额度用完是服务暂停，不会自动扣款。
 fuzhou-mahjong-github/
 ├── README.md              仓库首页说明
 ├── DEPLOY_GITHUB.md       本教程
-├── VERSION                版本号（v7）
+├── VERSION                版本号（v10）
 ├── package.json           依赖与启动命令
 ├── package-lock.json
 ├── render.yaml            Render 配置

@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/mahjong.test.js && node test/game.test.js && node test/settle.test.js && node test/drawn.test.js && node test/jinque.test.js && node test/labels.test.js && node test/swap.test.js && node test/qianggang.test.js && node test/jinkan.test.js && node test/priority.test.js && node test/meld.test.js && node test/ting.test.js && node test/ron.test.js && node test/bugang.test.js && node test/qiangjin.test.js && node test/tianhu.test.js && node test/dandiao.test.js && node test/quan.test.js && node test/bot.test.js",
+    "test": "node test/mahjong.test.js && node test/opening.test.js && node test/game.test.js && node test/settle.test.js && node test/drawn.test.js && node test/jinque.test.js && node test/labels.test.js && node test/swap.test.js && node test/qianggang.test.js && node test/jinkan.test.js && node test/priority.test.js && node test/meld.test.js && node test/ting.test.js && node test/ron.test.js && node test/bugang.test.js && node test/qiangjin-priority.test.js && node test/hu-peng.test.js && node test/qiangjin.test.js && node test/tianhu.test.js && node test/dandiao.test.js && node test/quan.test.js && node test/bot.test.js",
     "sim": "node tools/bot-sim.js 200",
     "smoke": "node test/smoke.js"
   },
