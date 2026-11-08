@@ -89,6 +89,15 @@ wss.on('connection', (ws) => {
     const seat = ws.seat;
 
     switch (t) {
+      case 'leave': {
+        // 等待阶段返回首页：让出座位，房间还有人则移交房主
+        const r = room.leaveWaiting(ws.pid);
+        if (r && !r.ok) { send(ws, { t: 'error', msg: r.msg }); break; }
+        ws.roomId = null; ws.seat = null; ws.pid = null;
+        send(ws, { t: 'left' });
+        if (r.humans === 0) rooms.delete(room.id);   // 真人走光了，房间连同机器人一起回收
+        break;
+      }
       case 'start':
         if (seat !== 0) { send(ws, { t: 'error', msg: '只有房主能开始' }); break; }
         room.startGame(); // 仅大乱斗模式
@@ -134,6 +143,12 @@ wss.on('connection', (ws) => {
       }
       case 'jinkan': {
         const r = room.declareJinKan(seat);
+        if (r && !r.ok) send(ws, { t: 'error', msg: r.msg });
+        break;
+      }
+      case 'emoji': {
+        // 快捷表情：广播给全桌，不走 state 快照
+        const r = room.sendEmoji(seat, msg.id);
         if (r && !r.ok) send(ws, { t: 'error', msg: r.msg });
         break;
       }

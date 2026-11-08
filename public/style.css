@@ -99,7 +99,7 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 .self-disc .disc-label { font-size: 10px; opacity: .65; margin-right: 4px; }
 
 /* ---------- 操作 ---------- */
-.actions { display: flex; gap: 8px; justify-content: center; padding: 8px; min-height: 48px; flex-wrap: wrap; }
+.actions { display: flex; gap: 8px; justify-content: center; padding: 8px 54px; min-height: 48px; flex-wrap: wrap; }
 .actions button { padding: 10px 18px; border: none; border-radius: 22px; font-size: 15px; font-weight: 700; }
 .act-hu { background: #e53935; color: #fff; }
 .act-peng { background: #fb8c00; color: #fff; }
@@ -121,8 +121,9 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 /* ---------- 竖屏提示 ---------- */
 #rotateHint { display: none; }
 #rotateHint.dismiss { display: none !important; }
+/* 只有进了牌桌才要求横屏：大厅竖屏能正常用，否则首页的「规则」按钮会被整屏提示挡住 */
 @media (orientation: portrait) and (max-width: 900px) {
-  #rotateHint { display: flex; position: fixed; inset: 0; z-index: 999; background: #0b6b3a; color: #fff; align-items: center; justify-content: center; text-align: center; font-size: 18px; line-height: 1.8; }
+  body.in-game #rotateHint { display: flex; position: fixed; inset: 0; z-index: 999; background: #0b6b3a; color: #fff; align-items: center; justify-content: center; text-align: center; font-size: 18px; line-height: 1.8; }
   #rotateHint small { font-size: 13px; opacity: .8; }
   #rotateGo { margin-top: 18px; padding: 10px 22px; font-size: 15px; border-radius: 10px; border: 1px solid rgba(255,255,255,.5); background: rgba(255,255,255,.12); color: #fff; }
   .rh-ico { font-size: 46px; margin-bottom: 8px; animation: spin 2.4s ease-in-out infinite; }
@@ -326,3 +327,274 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
   border: 1px dashed rgba(240,200,80,.6); border-radius: 8px; background: rgba(240,200,80,.10);
 }
 .act-chi { background: #2e7d32; color: #fff; }
+
+/* ============================================================
+   v11：快捷表情 / 音效开关 / 大牌特效
+   ============================================================ */
+
+/* ---------- 右下角悬浮按钮（位置由 JS 贴着操作栏居中） ---------- */
+.social { position: fixed; right: 8px; display: flex; flex-direction: column; gap: 6px; z-index: 27; }  /* 高于表情遮罩(24)与面板(26)，打开面板时仍点得到 */
+.social-btn {
+  width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba(255,255,255,.3);
+  background: rgba(0,0,0,.42); color: #fff; font-size: 20px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,.35); backdrop-filter: blur(4px);
+  transition: transform .12s ease, background .2s ease;
+}
+.social-btn:active { transform: scale(.9); }
+.social-btn.mute { font-size: 17px; opacity: .9; }
+.social-btn.voice { font-size: 13px; font-weight: 700; letter-spacing: 0; font-family: inherit; }
+.social-btn.off { opacity: .55; }
+.social-btn.shake { animation: socialShake .3s ease; }
+@keyframes socialShake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-3px)} 75%{transform:translateX(3px)} }
+
+/* ---------- 表情面板 ---------- */
+.emoji-panel {
+  display: none; position: fixed; right: 8px; width: min(278px, 84vw); z-index: 26;
+  background: linear-gradient(180deg, #14684a, #0e5238);
+  border: 1px solid rgba(255,255,255,.22); border-radius: 14px; padding: 10px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.55);
+}
+/* 遮罩：点空白处只关面板，不会顺手把牌打出去 */
+.emoji-backdrop { display: none; position: fixed; inset: 0; z-index: 24; background: rgba(0,0,0,.22); }
+.emoji-backdrop.show { display: block; }
+.emoji-panel.show { display: block; animation: epIn .16s ease-out; }
+@keyframes epIn { from { opacity: 0; transform: translateY(8px) scale(.97); } to { opacity: 1; transform: none; } }
+.ep-head { font-size: 12px; font-weight: 700; color: #ffcf3f; display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.ep-head span { font-weight: 400; font-size: 10px; opacity: .7; color: #dff7e9; }
+.ep-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.ep-item {
+  display: flex; align-items: center; gap: 7px; padding: 8px 8px; border-radius: 10px;
+  background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.16); color: #fff;
+  font-size: 12px; text-align: left; position: relative; overflow: hidden;
+}
+.ep-item:active { transform: scale(.96); background: rgba(255,255,255,.2); }
+.ep-item .ep-ico { font-size: 20px; flex: 0 0 auto; }
+.ep-item .ep-lab { line-height: 1.2; }
+.ep-item[data-id="kneel"] { grid-column: span 2; }
+.ep-item[data-id="kneel"] .ep-lab { font-size: 11px; opacity: .92; }
+
+/* ---------- 表情气泡 ---------- */
+.emoji-layer { position: fixed; inset: 0; pointer-events: none; z-index: 25; overflow: hidden; }
+.emoji-bubble {
+  position: absolute; max-width: 240px; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-radius: 14px; background: #fffdf3; color: #2a2110;
+  font-size: 14px; font-weight: 700; line-height: 1.35; white-space: pre-line;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45), 0 0 0 2px rgba(255,207,63,.75);
+  transform-origin: var(--org, 50% 100%);
+  animation: bubbleIn .22s ease-out both;
+}
+.emoji-bubble .eb-inner { display: flex; align-items: center; gap: 8px; animation: bubbleScale .3s cubic-bezier(.18,1.5,.4,1) both; }
+.emoji-bubble::after {
+  content: ''; position: absolute; width: 10px; height: 10px; background: #fffdf3;
+  transform: rotate(45deg); bottom: -5px; left: var(--tail, 50%);
+  box-shadow: 2px 2px 0 rgba(255,207,63,.75);
+}
+.emoji-bubble .eb-ico { font-size: 26px; line-height: 1; animation: icoPop .45s ease-out both; }
+.emoji-bubble .eb-txt { word-break: break-word; }
+.emoji-bubble.tone-red { background: #fff0f0; box-shadow: 0 6px 20px rgba(0,0,0,.45), 0 0 0 2px #ff5252; }
+.emoji-bubble.tone-red::after { background: #fff0f0; box-shadow: 2px 2px 0 #ff5252; }
+.emoji-bubble.tone-warn { background: #fffbe8; }
+.emoji-bubble.tone-swag { background: #fff6e0; box-shadow: 0 6px 20px rgba(0,0,0,.45), 0 0 0 2px #ff9800; }
+.emoji-bubble.tone-plead { background: #fff1f5; box-shadow: 0 6px 20px rgba(0,0,0,.45), 0 0 0 2px #ff6f91; }
+.emoji-bubble.tone-plead::after { background: #fff1f5; box-shadow: 2px 2px 0 #ff6f91; }
+.emoji-bubble.tone-plead .eb-txt { color: #b3244a; }
+.emoji-bubble.tone-swag .eb-txt { font-size: 17px; letter-spacing: 1px; }
+.emoji-bubble.out { animation: bubbleOut .3s ease forwards; }
+@keyframes bubbleScale { from { transform: scale(.5); } to { transform: scale(1); } }
+.emoji-bubble.pos-right { transform: translate(-100%, -50%); transform-origin: 100% 50%; }
+.emoji-bubble.pos-left { transform: translate(0, -50%); transform-origin: 0 50%; }
+.emoji-bubble.pos-top { transform: translate(-50%, 0); transform-origin: 50% 0; }
+.emoji-bubble.pos-self { transform: translate(-50%, -100%); }
+.emoji-bubble.pos-right::after, .emoji-bubble.pos-left::after { top: 50%; bottom: auto; margin-top: -5px; }
+.emoji-bubble.pos-right::after { right: -5px; left: auto; }
+.emoji-bubble.pos-left::after { left: -5px; }
+.emoji-bubble.pos-top::after { top: -5px; bottom: auto; }
+@keyframes bubbleIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes bubbleOut { to { opacity: 0; scale: .85; } }
+@keyframes icoPop { 0% { transform: scale(.2) rotate(-18deg); } 100% { transform: none; } }
+
+/* ---------- 大牌特效 ---------- */
+.fx-layer { position: fixed; inset: 0; pointer-events: none; z-index: 40; overflow: hidden; display: none; }
+.fx-layer.show { display: block; pointer-events: auto; cursor: pointer; }
+.fx-flash {
+  position: absolute; inset: 0;
+  background: radial-gradient(circle at 50% 46%, rgba(255,255,255,.95), rgba(255,214,64,.6) 26%, rgba(255,140,0,.18) 52%, transparent 70%);
+  animation: fxFlash .9s ease-out forwards;
+}
+@keyframes fxFlash { 0% { opacity: 0; transform: scale(.55); } 16% { opacity: 1; } 100% { opacity: 0; transform: scale(1.4); } }
+.fx-rays {
+  position: absolute; left: 50%; top: 46%; width: 150vmax; height: 150vmax; margin: -75vmax 0 0 -75vmax;
+  background: repeating-conic-gradient(from 0deg, rgba(255,214,64,.5) 0deg 2.5deg, transparent 2.5deg 10deg);
+  -webkit-mask-image: radial-gradient(circle, #000 6%, rgba(0,0,0,.65) 26%, transparent 58%);
+  mask-image: radial-gradient(circle, #000 6%, rgba(0,0,0,.65) 26%, transparent 58%);
+  animation: fxRays 1.9s cubic-bezier(.2,.75,.25,1) forwards;
+}
+@keyframes fxRays { 0% { opacity: 0; transform: scale(.15) rotate(0); } 22% { opacity: .95; } 100% { opacity: 0; transform: scale(1) rotate(64deg); } }
+.fx-title { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; text-align: center; padding: 0 12px; }
+.fx-big {
+  font-size: clamp(40px, 10vw, 104px); font-weight: 900; letter-spacing: .1em; color: #ffd54a;
+  text-shadow: 0 0 18px rgba(255,190,0,.95), 0 0 44px rgba(255,120,0,.75), 0 5px 0 #8a3b00, 0 10px 24px rgba(0,0,0,.6);
+  animation: fxPop .8s cubic-bezier(.16,1.45,.36,1) both;
+}
+.fx-big.lv1 { font-size: clamp(34px, 7vw, 72px); color: #ffe9a8; text-shadow: 0 0 14px rgba(255,190,0,.8), 0 4px 0 #7a3300, 0 8px 18px rgba(0,0,0,.55); }
+.fx-sub {
+  font-size: clamp(13px, 2.4vw, 19px); color: #fff; font-weight: 700; letter-spacing: 2px;
+  padding: 3px 14px; border-radius: 999px; background: rgba(0,0,0,.3);
+  text-shadow: 0 2px 6px rgba(0,0,0,.9); animation: fxFade .5s .2s ease both;
+}
+.fx-fan {
+  margin-top: 4px; font-size: clamp(14px, 2.6vw, 20px); font-weight: 800; color: #fff8dc;
+  padding: 4px 16px; border-radius: 999px; background: rgba(12,6,0,.62);
+  border: 1px solid rgba(255,213,74,.55); box-shadow: 0 4px 14px rgba(0,0,0,.35);
+  animation: fxFade .5s .35s ease both;
+}
+.fx-fan b { font-size: 1.6em; color: #ffd54a; text-shadow: 0 0 14px rgba(255,180,0,.95), 0 2px 0 #7a3300; vertical-align: -2px; }
+@keyframes fxPop { 0% { opacity: 0; transform: scale(.35) rotate(-6deg); } 60% { opacity: 1; } 100% { opacity: 1; transform: scale(1) rotate(0); } }
+@keyframes fxFade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.fx-coin {
+  position: absolute; top: -8vh; font-size: 20px; color: #ffcf3f; font-weight: 900;
+  text-shadow: 0 0 10px rgba(255,190,0,.9); animation: coinFall linear forwards;
+}
+@keyframes coinFall {
+  0% { opacity: 0; transform: translateY(0) rotate(0) scale(.7); }
+  10% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(112vh) rotate(540deg) scale(1.1); }
+}
+.fx-layer.shake .fx-title { animation: fxShake .5s ease-out; }
+@keyframes fxShake { 0%,100%{transform:translate(0,0)} 20%{transform:translate(-7px,4px)} 40%{transform:translate(6px,-5px)} 60%{transform:translate(-4px,3px)} 80%{transform:translate(3px,-2px)} }
+@media (prefers-reduced-motion: reduce) {
+  .fx-flash, .fx-rays, .fx-coin, .fx-big { animation-duration: .01s !important; animation-iteration-count: 1 !important; }
+}
+/* 横屏手机屏幕矮：面板收紧，少挡牌桌 */
+@media (max-height: 520px) {
+  .fx-big { font-size: clamp(28px, 6.4vw, 52px); }
+  .fx-title { transform: translateY(-13%); gap: 4px; }
+  .emoji-panel { width: min(252px, 62vw); padding: 8px; }
+  .ep-head { margin-bottom: 6px; font-size: 11px; }
+  .ep-head span { display: none; }
+  .ep-grid { gap: 5px; }
+  .ep-item { padding: 6px 7px; font-size: 11px; }
+  .ep-item .ep-ico { font-size: 16px; }
+}
+@media (max-width: 560px) {
+  .social-btn { width: 44px; height: 44px; font-size: 21px; }
+  .emoji-panel { width: min(300px, 92vw); }
+  .emoji-bubble { max-width: 190px; font-size: 13px; padding: 7px 10px; }
+  .emoji-bubble .eb-ico { font-size: 22px; }
+}
+
+/* ============================================================
+   v11：首页规则入口 / 规则弹窗 / 房间返回首页
+   ============================================================ */
+
+/* 大厅卡片右上角的规则标志 */
+.card { position: relative; }
+.card .rules-entry {
+  position: absolute; top: 10px; right: 10px; width: auto; margin: 0;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 11px; font-size: 12px; line-height: 1.2;
+  border-radius: 999px; border: 1px solid rgba(255,255,255,.32);
+  background: rgba(0,0,0,.24); color: #eafff2;
+  transition: transform .12s ease, background .2s ease;
+}
+.card .rules-entry:active { transform: scale(.94); background: rgba(0,0,0,.4); }
+.card .rules-entry .re-ico { display: block; opacity: .9; }
+
+/* ---------- 规则弹窗 ---------- */
+.rules-overlay { z-index: 30; }
+.rules-modal {
+  padding: 0; width: 94%; max-width: 620px; max-height: 88%;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: #0f5137;
+}
+.rules-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 14px 16px 10px; border-bottom: 1px solid rgba(255,255,255,.16);
+  background: linear-gradient(180deg, #14684a, #0f5137); flex: 0 0 auto;
+}
+.rules-head h2 { margin: 0; font-size: 18px; text-align: left; }
+.rules-close {
+  width: 32px; height: 32px; flex: 0 0 auto; border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.25);
+  color: #fff; font-size: 14px; line-height: 1;
+}
+.rules-close:active { transform: scale(.92); }
+.rules-tip {
+  font-size: 11px; opacity: .6; padding: 8px 16px; flex: 0 0 auto;
+  border-bottom: 1px solid rgba(0,0,0,.18); background: #0f5137;
+}
+.rules-body {
+  flex: 1 1 auto; min-height: 0;   /* flex 里不加 min-height:0，内容会溢出弹窗盖住标题 */
+  overflow-y: auto; padding: 10px 14px 18px; -webkit-overflow-scrolling: touch;
+}
+
+/* 折叠小节 */
+.rule-sec {
+  border: 1px solid rgba(255,255,255,.14); border-radius: 10px; margin-bottom: 8px;
+  background: rgba(0,0,0,.18); overflow: hidden;
+}
+.rule-h {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 11px 12px; background: transparent; border: none; color: #fff;
+  font-size: 14px; font-weight: 700; text-align: left; line-height: 1.3;
+}
+.rule-h:active { background: rgba(255,255,255,.06); }
+.rule-n {
+  flex: 0 0 auto; width: 21px; height: 21px; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: #ffcf3f; color: #3a2a00; font-size: 12px; font-weight: 800;
+}
+.rule-t { flex: 1 1 auto; }
+.rule-arrow { flex: 0 0 auto; font-size: 11px; opacity: .6; transition: transform .2s ease; }
+.rule-sec.open .rule-arrow { transform: rotate(180deg); }
+.rule-c { display: none; padding: 2px 12px 12px; font-size: 13px; line-height: 1.72; color: #eafff2; }
+.rule-sec.open .rule-c { display: block; animation: ruleFade .18s ease-out; }
+@keyframes ruleFade { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
+.rule-c p { margin: 6px 0; }
+.rule-c ul { margin: 6px 0; padding-left: 18px; }
+.rule-c li { margin: 5px 0; }
+.rule-c b, .rule-c strong { color: #ffd75e; font-weight: 700; }
+.rule-c em { font-style: normal; color: #9fe8c2; }
+.rule-c .hl {
+  display: block; margin: 8px 0; padding: 8px 10px; border-radius: 8px;
+  background: rgba(255,207,63,.12); border-left: 3px solid #ffcf3f;
+  font-size: 12.5px; line-height: 1.6;
+}
+.rule-c .mini { opacity: .7; font-size: 12px; }
+
+/* 规则里的表格：窄屏可横向滑动，不挤成一团 */
+.rule-scroll { overflow-x: auto; margin: 8px -2px; }
+.rule-scroll::-webkit-scrollbar { height: 4px; }
+.rule-c table { border-collapse: collapse; width: 100%; font-size: 12px; min-width: 300px; }
+.rule-c th, .rule-c td { border: 1px solid rgba(255,255,255,.16); padding: 5px 8px; text-align: left; }
+.rule-c th { background: rgba(0,0,0,.28); color: #ffe9a8; font-weight: 700; white-space: nowrap; }
+.rule-c td:first-child { white-space: nowrap; }
+.rule-c tr:nth-child(even) td { background: rgba(255,255,255,.03); }
+
+/* 房间面板的返回首页 */
+.back-btn {
+  width: 100%; padding: 10px; margin-top: 8px; border-radius: 10px;
+  border: 1px solid rgba(255,255,255,.28); background: transparent;
+  color: #d9f5e6; font-size: 14px;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+}
+/* 箭头用 CSS 画，避免小字号下「←」被渲染成一根短横 */
+.back-btn::before {
+  content: ''; width: 7px; height: 7px; flex: 0 0 auto;
+  border-left: 1.6px solid currentColor; border-bottom: 1.6px solid currentColor;
+  transform: rotate(45deg) translate(1px, -1px);
+}
+.back-btn:active { background: rgba(255,255,255,.1); }
+
+@media (max-height: 520px) {
+  .rules-modal { max-height: 96%; }
+  .rules-head { padding: 9px 14px 7px; }
+  .rules-head h2 { font-size: 16px; }
+  .rules-tip { display: none; }
+  .rules-body { padding: 8px 12px 14px; }
+  .rule-sec { margin-bottom: 6px; }
+  .rule-h { padding: 9px 11px; font-size: 13px; }
+  .rule-c { font-size: 12.5px; line-height: 1.65; }
+}

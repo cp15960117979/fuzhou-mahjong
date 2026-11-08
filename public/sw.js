@@ -1,6 +1,6 @@
 // 福州麻将 · Service Worker (PWA 离线 + 添加到主屏幕)
-const CACHE_VERSION = 'fz-mahjong-v20-1106';
-const CORE = ['/', '/index.html', '/game.js', '/style.css', '/manifest.json'];
+const CACHE_VERSION = 'fz-mahjong-v23-1119';
+const CORE = ['/', '/index.html', '/game.js', '/style.css', '/manifest.json', '/voice/voice.mp3'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

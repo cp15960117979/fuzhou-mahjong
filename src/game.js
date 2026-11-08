@@ -52,6 +52,33 @@ class Room {
     this.jiangEnded = false;   // 本局打完四圈 → 本将结算
     this.lastResult = null; // {winnerSeat,draw}
     this.jinKanActive = false; // 有人声明金坎 → 全场只能自摸
+    // v11：事件流。动作发生时 push 一条，跟着下一次 state 广播一起下发，
+    //   前端据此放音效/播特效（不靠 diff 状态猜，碰/杠/大牌才能区分得清）。
+    this.events = [];
+    this.evSeq = 0;
+  }
+
+  emit(ev) {
+    this.events.push({ ...ev, seq: ++this.evSeq });
+    if (this.events.length > 40) this.events.shift();
+  }
+
+  // 快捷表情：不做进状态快照，直接广播一条轻量消息（不触发整页重绘）
+  sendEmoji(seat, id) {
+    const OK = ['hurry', 'help', 'kneel', 'who'];
+    if (!OK.includes(id)) return { ok: false, msg: '没有这个表情' };
+    const p = this.getPlayer(seat);
+    if (!p) return { ok: false, msg: '座位不存在' };
+    const now = Date.now();
+    if (p.lastEmojiAt && now - p.lastEmojiAt < 900) return { ok: false, msg: '发得太快了' };
+    p.lastEmojiAt = now;
+    const msg = JSON.stringify({ t: 'emoji', seat, id, name: p.name });
+    for (const pl of this.players) {
+      if (pl.ws && pl.connected) {
+        try { pl.ws.send(msg); } catch (e) { /* ignore */ }
+      }
+    }
+    return { ok: true };
   }
 
   addPlayer(ws, name) {
@@ -72,6 +99,28 @@ class Room {
     const p = this.players.find((x) => x.pid === pid);
     if (p) { p.connected = false; p.ws = null; }
     this.broadcast();
+  }
+
+  // 等待阶段主动退出：把座位让出来，回大厅重新建房
+  // 关键：重排座位后必须同步每个连接上的 ws.seat，否则 server 端 ws.seat 还是旧号，操作会错位
+  leaveWaiting(pid) {
+    if (this.phase !== 'waiting') return { ok: false, msg: '对局已开始，不能退出' };
+    const idx = this.players.findIndex((x) => x.pid === pid);
+    if (idx < 0) return { ok: false, msg: '不在这个房间' };
+    const me = this.players[idx];
+    if (me.ws) { me.ws.seat = null; me.ws.pid = null; me.ws.roomId = null; }
+    this.players.splice(idx, 1);
+    // 真人排在前面：房主必须是 seat 0，否则 server 的「只有房主能开始」判断会失效
+    const humans = this.players.filter((p) => !p.isBot);
+    const bots = this.players.filter((p) => p.isBot);
+    this.players = humans.concat(bots);
+    this.players.forEach((p, i) => {
+      p.seat = i;
+      p.isHost = i === 0;
+      if (p.ws) p.ws.seat = i;
+    });
+    this.broadcast();
+    return { ok: true, humans: humans.length, seats: this.players.length };
   }
 
   // ---------- 机器人（学习练习用） ----------
@@ -228,6 +277,7 @@ class Room {
     this.log = [`第${this.roundNo}局 · 庄: ${this.players[this.dealer].name} · 摇骰${this.dealDice}定抓牌`];
     this.buflower();
     this.log.push('补花完成');
+    this.emit({ ev: 'deal', dealer: this.dealer });
 
     // 第二次摇骰：换牌方向
     this.computeSwapDice();
@@ -271,6 +321,7 @@ class Room {
       this.swap = { id: ++this.swapSeq, diceSum: sum, dice: [d1, d2], dir, choices: {}, picks: {} };
       this.phase = 'swap';
       this.log.push(`换牌：摇出 ${d1} + ${d2} = ${sum} 点 → ${dirText(dir)}`);
+      this.emit({ ev: 'dice', dice: [d1, d2], sum, dir });
       this.armSwapTimeout();
       return;
     }
@@ -404,6 +455,7 @@ class Room {
     }
     this.swapFail = 0;
     this.swap = null;
+    this.emit({ ev: 'swap' });   // 换牌真正落地，才有"换牌完成"的音效
     this.openJokerAndStart();
   }
 
@@ -420,6 +472,7 @@ class Room {
     this.phase = 'playing';
     this.opening = true; // 抢金窗口
     this.log.push(`金: ${MJ.TILE_NAMES[this.joker]}（公共展示1张，场下3张百搭）`);
+    this.emit({ ev: 'joker', tile: this.joker });
     // 庄家开局就是 17 张（发牌时就多拿 1 张，换牌从 17 张里挑 3 张），
     //   所以这里**不再摸牌**，直接轮到庄家出牌；天胡就在这一刻判定。
     this.turn = this.dealer;
@@ -447,6 +500,7 @@ class Room {
     p.lastDrawn = tile;
     this.lastDiscard = null;
     this.pending = null;
+    this.emit({ ev: 'draw', seat: this.turn });
     // 自摸 / 抢金 判定
     const r = this.checkWinOf(p);
     // 金坎家：坎位（lo-金-hi）是锁定的，必须真摸到金、且剩下 14 张自己凑成 4 面子+将。
@@ -477,6 +531,7 @@ class Room {
     this.lastResult = { draw: true, winnerSeat: -1 };
     this.jiangEnded = this.isJiangLastGame();
     this.log.push('牌墙摸完，臭庄（流局，庄连庄）');
+    this.emit({ ev: 'drawgame' });
     this.broadcast();
   }
 
@@ -508,6 +563,7 @@ class Room {
     const openingDiscard = this.opening && seat === this.dealer;
     this.opening = false;
     this.log.push(`${p.name} 打出 ${MJ.TILE_NAMES[tile]}`);
+    this.emit({ ev: 'discard', seat, tile });
     this.openClaims(seat, tile, openingDiscard);
     return { ok: true };
   }
@@ -866,6 +922,7 @@ class Room {
     this.recordEatPong(p, fromSeat);
     this.turn = seat; this.lastDiscard = null;
     this.log.push(`${p.name} 碰 ${MJ.TILE_NAMES[tile]}`);
+    this.emit({ ev: 'peng', seat, tile });
     this.pending = null; this.broadcast();
   }
 
@@ -904,6 +961,7 @@ class Room {
     this.recordEatPong(p, fromSeat);
     this.turn = seat; this.lastDiscard = null;
     this.log.push(`${p.name} 吃 ${MJ.TILE_NAMES[tile]}`);
+    this.emit({ ev: 'chi', seat, tile });
     this.pending = null; this.broadcast();
     return { ok: true };
   }
@@ -925,6 +983,7 @@ class Room {
     this.recordEatPong(p, fromSeat);
     this.turn = seat; this.lastDiscard = null; this.pending = null;
     this.log.push(`${p.name} 杠 ${MJ.TILE_NAMES[tile]}`);
+    this.emit({ ev: 'gang', seat, tile });
     this.drawReplacement(p);
     this.selfCanHu = this.checkWinOf(p).win;
     this.broadcast();
@@ -957,6 +1016,7 @@ class Room {
     p.hand = sortHand(p.hand, this.joker);
     this.recordEatPong(p, -1); // 暗杠算一手（包牌手数），无外部喂牌
     this.log.push(`${p.name} 暗杠`);
+    this.emit({ ev: 'angang', seat });
     this.drawReplacement(p);
     this.selfCanHu = this.checkWinOf(p).win;
     this.broadcast();
@@ -1010,6 +1070,7 @@ class Room {
     p.melds[mi] = { type: 'gang', tiles: [tile, tile, tile, tile], from: p.melds[mi].from, bugang: true };
     p.hand = sortHand(p.hand, this.joker);
     this.log.push(`${p.name} 加杠 ${MJ.TILE_NAMES[tile]}`);
+    this.emit({ ev: 'bugang', seat, tile });
     this.pending = null;
     // 补摸一张（花直接补花）
     this.drawReplacement(p);
@@ -1060,6 +1121,7 @@ class Room {
     if (!p) return { ok: false };
     p.declaredTing = true;
     this.log.push(`${p.name} 宣告听牌`);
+    this.emit({ ev: 'ting', seat });
     this.broadcast();
     return { ok: true };
   }
@@ -1119,6 +1181,7 @@ class Room {
     p.hand = sortHand(p.hand, this.joker);
     const showTxt = `亮出 ${MJ.TILE_NAMES[lo]} 〔金位〕 ${MJ.TILE_NAMES[hi]}`;
     this.log.push(`${p.name} 宣告金坎（${showTxt}），手牌全部盖倒：不吃不碰不杠，只摸金自摸`);
+    this.emit({ ev: 'jinkan', seat });
     this.lastDiscard = null;
     this.nextTurn();
     return { ok: true };
@@ -1253,6 +1316,12 @@ class Room {
     };
     const labelTxt = labels.length ? `（${labels.join(' / ')}）` : '';
     this.log.push(`${p.name} ${zimo ? '自摸' : qianggang ? '抢杠胡' : '胡牌'}${labelTxt}！${result.summary}`);
+    // 胡牌事件：big=有叠加奖励的大牌（前端据此放礼炮/撒金特效）；bonus 越大特效越足
+    this.emit({
+      ev: 'hu', seat, name: p.name, zimo: !!zimo, qiangjin: !!qiangjin, qianggang: !!qianggang,
+      labels, fan: result.fan, bonus: result.bonusTotal || 0,
+      big: (result.bonusTotal || 0) > 0, winTile, from: zimo ? seat : fromSeat,
+    });
     this.broadcast();
     return { ok: true };
   }
@@ -1388,6 +1457,17 @@ class Room {
   }
 
   // 大乱斗分摊（含包牌）。总额恒 3P（三家各应付 P），包牌重分配。
+  //
+  // 包牌的责任逻辑（别简化成"谁喂得多谁就赔"）：
+  //   1. 有人做清/混一色，每一手吃碰杠都是别人在帮他凑牌型 —— 这是"助力"，
+  //      喂得越多，他做成的概率越大，所以喂牌的人不能和旁观者出一样多。
+  //   2. 但真正把牌型做实的是**最后一手**：都已经吃了三手同花色了，还往这个颜色上打，
+  //      他再吃下去就报听了 —— 这一张的责任是明确的。所以"最后一手是谁喂的"先于"喂了几手"。
+  //   3. 如果从头到尾都是同一个人喂（喂满 4 手以上），这个牌型就是他一手喂成的 → 全包。
+  //   4. 点炮时，"最后一手"由放炮者扮演：最后那张是他打的，责任归他；
+  //      喂牌的人在 3 手这一档不再额外承担（只付 1/4）。
+  //
+  // 注：副露最多 5 组，最后一手必须取数组末位，不能写死 provs[3]。
   spreadDaluan(pieces, zimo, from, isQingHun, winner) {
     const T = pieces;        // 单份
     const Am = 3 * T;        // 总额
@@ -1395,41 +1475,33 @@ class Room {
     const others = this.players.filter((p) => p.seat !== winner.seat);
     const pushP = (seat, amt) => payers.push({ seat, amount: amt });
 
+    const provs = winner.providers;
+    const hc = provs.length;
+    const lastFeeder = hc ? provs[hc - 1] : -1;                    // 最后一手是谁喂的
+    const allSame = hc > 0 && provs.every((x) => x === provs[0]);  // 每一手都是同一个人喂的
+
+    // 没到包牌门槛：自摸 / 点炮都是三家各付一份
+    if (!isQingHun || hc < 3) {
+      for (const p of others) pushP(p.seat, T);
+      return payers;
+    }
+
     if (zimo) {
-      const hc = winner.providers.length;
-      const provs = winner.providers;
-      if (!isQingHun || hc < 3) {
-        for (const p of others) pushP(p.seat, T);
-      } else if (hc === 3) {
-        const f3 = provs[2]; // 喂第 3 手的人
-        for (const p of others) pushP(p.seat, p.seat === f3 ? Am / 2 : Am / 4);
-      } else { // hc >= 4
-        const allSame = provs.length === 4 && provs.every((x) => x === provs[0]);
-        const f4 = provs[3];
-        if (allSame) pushP(f4, Am);                 // 某家喂满 4 手 → 全担
-        else pushP(f4, Am / 2);                     // 最后喂者担一半
-        for (const p of others) if (p.seat !== f4) pushP(p.seat, Am / 4);
+      if (allSame && hc >= 4) {
+        pushP(lastFeeder, Am);                                   // 一手喂成：全包，另外两家 0
+      } else {
+        pushP(lastFeeder, Am / 2);                               // 最后一手的人担一半
+        for (const p of others) if (p.seat !== lastFeeder) pushP(p.seat, Am / 4);
       }
+    } else if (allSame && hc >= 4) {
+      // 牌型是 A 一手喂成的，但最后一张是 C 打的：两人各半，第三人不出
+      if (lastFeeder === from) pushP(from, Am);
+      else { pushP(from, Am / 2); pushP(lastFeeder, Am / 2); }
+    } else if (hc >= 4) {
+      pushP(from, Am);                                           // 喂牌的人不统一：最后那张谁打的谁全担
     } else {
-      const hc = winner.providers.length;
-      const provs = winner.providers;
-      if (!isQingHun || hc < 3) {
-        // 非包牌点炮：三家一起付（各付 1 份），没有点炮单给的
-        for (const p of others) pushP(p.seat, T);
-      } else if (hc === 3) {
-        pushP(from, Am / 2);
-        for (const p of others) if (p.seat !== from) pushP(p.seat, Am / 4);
-      } else { // hc >= 4
-        const allSame = provs.length === 4 && provs.every((x) => x === provs[0]);
-        const f4 = provs[3];
-        if (allSame) {
-          if (f4 === from) pushP(from, Am);          // 喂4手者即放炮者 → 全担
-          else { pushP(from, Am / 2); pushP(f4, Am / 2); } // 放炮者+喂4手者各半
-        } else {
-          pushP(from, Am);                           // 无人喂满4手 → 放炮者全担
-        }
-        // 第三人（既非放炮也非喂4手）不付
-      }
+      pushP(from, Am / 2);                                       // 3 手：放炮者一半，其余两家各 1/4
+      for (const p of others) if (p.seat !== from) pushP(p.seat, Am / 4);
     }
     return payers;
   }
@@ -1550,9 +1622,11 @@ class Room {
   }
 
   broadcast() {
+    // 事件只跟着本次广播走一次：先取走再发，避免重连/重发时重复播放音效
+    const evs = this.events.length ? this.events.splice(0, this.events.length) : null;
     for (const p of this.players) {
       if (p.ws && p.connected) {
-        try { p.ws.send(JSON.stringify({ t: 'state', state: this.getState(p.seat) })); }
+        try { p.ws.send(JSON.stringify({ t: 'state', state: this.getState(p.seat), events: evs })); }
         catch (e) { /* ignore */ }
       }
     }

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="福麻大乱斗" />
-  <title>福麻大乱斗学习模拟器 v1</title>
+  <title>福麻大乱斗学习模拟器 v11</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
   <link rel="stylesheet" href="style.css" />
@@ -16,7 +16,13 @@
   <!-- 大厅 -->
   <section id="lobby" class="view active">
     <div class="card">
-      <h1 class="logo"><span>福麻大乱斗</span><em>学习模拟器 <b class="ver" id="appVer">v1</b></em></h1>
+      <button id="rulesBtn" class="rules-entry" aria-label="查看规则">
+        <svg class="re-ico" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path fill="currentColor" d="M21 5c-1.1-.35-2.3-.5-3.5-.5-1.95 0-4.05.4-5.5 1.5-1.45-1.1-3.55-1.5-5.5-1.5S2.45 4.9 1 6v14.65c0 .25.25.5.5.5.1 0 .15-.05.25-.05C3.1 20.45 5.05 20 6.5 20c1.95 0 4.05.4 5.5 1.5 1.35-.85 3.8-1.5 5.5-1.5 1.65 0 3.35.3 4.75 1.05.1.05.15.05.25.05.25 0 .5-.25.5-.5V6c-.6-.45-1.25-.75-2-1zm0 13.5c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5V8c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 2.4.15 3.5.5v11.5z"/>
+        </svg>
+        <span>规则</span>
+      </button>
+      <h1 class="logo"><span>福麻大乱斗</span><em>学习模拟器 <b class="ver" id="appVer">v12</b></em></h1>
       <p class="sub">四人联机 · 金百搭 · 花即分</p>
       <input id="nameInput" placeholder="你的昵称" maxlength="8" />
       <button id="createBtn" class="primary">创建房间</button>
@@ -58,6 +64,20 @@
     <div class="actions" id="actions"></div>
     <div class="log" id="log"></div>
 
+    <!-- v11：快捷表情（按钮挂在操作栏右侧，面板向上弹出） -->
+    <div class="social" id="social">
+      <button id="emojiBtn" class="social-btn" aria-label="快捷表情" title="快捷表情">😀</button>
+      <button id="muteBtn" class="social-btn mute" aria-label="音效开关" title="音效开关">🔊</button>
+      <button id="voiceBtn" class="social-btn mute voice" aria-label="报牌语音" title="报牌语音">语</button>
+    </div>
+    <div id="emojiBackdrop" class="emoji-backdrop"></div>
+    <div id="emojiPanel" class="emoji-panel" role="dialog" aria-label="快捷表情">
+      <div class="ep-head">快捷表情<span>点一下全桌都能看到</span></div>
+      <div id="emojiGrid" class="ep-grid"></div>
+    </div>
+    <div id="emojiLayer" class="emoji-layer"></div>
+    <div id="fxLayer" class="fx-layer"></div>
+
     <!-- 等待面板: 开始 -->
     <div id="waitingPanel" class="overlay">
       <div class="modal">
@@ -68,6 +88,7 @@
           <button id="removeBotBtn">− 移除机器人</button>
         </div>
         <button id="startBtn" class="primary">开始游戏</button>
+        <button id="backLobbyBtn" class="back-btn">返回首页</button>
         <p id="waitHint" class="msg"></p>
       </div>
     </div>
@@ -96,6 +117,18 @@
       </div>
     </div>
   </section>
+
+  <!-- 规则说明（首页点「规则」打开） -->
+  <div id="rulesModal" class="overlay rules-overlay">
+    <div class="modal rules-modal">
+      <div class="rules-head">
+        <h2>福麻大乱斗 · 规则</h2>
+        <button id="rulesClose" class="rules-close" aria-label="关闭规则">✕</button>
+      </div>
+      <p class="rules-tip">点标题可以展开 / 收起 · 先看第 1 节就能上手</p>
+      <div id="rulesBody" class="rules-body"></div>
+    </div>
+  </div>
 
   <!-- 竖屏提示（仅竖屏显示，横屏自动隐藏） -->
   <div id="rotateHint"><div><div class="rh-ico">↻</div>请横屏游玩<br><small>福麻大乱斗学习模拟器 · 手机横放体验更佳</small><br><button id="rotateGo">继续用竖屏</button></div></div>

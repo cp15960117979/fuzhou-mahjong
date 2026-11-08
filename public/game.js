@@ -44,13 +44,27 @@ function handle(msg){
   switch(msg.t){
     case 'created': mySeat = msg.seat; showGame(); break;
     case 'joined': mySeat = msg.seat; showGame(); break;
-    case 'state': state = msg.state; render(); break;
+    case 'state': {
+      state = msg.state;
+      // 等待阶段有人退出后座位会重排，以服务端下发的 selfSeat 为准
+      if (state && state.selfSeat != null) mySeat = state.selfSeat;
+      // v11：事件流随 state 一起到——音效/特效按真实动作播，不靠 diff 猜
+      if (msg.events && msg.events.length) msg.events.forEach(onGameEvent);
+      render();
+      break;
+    }
+    case 'emoji': onEmoji(msg.seat, msg.id); break;
+    case 'left': finishLeave(); break;
     case 'error': showMsg(msg.msg, true); break;
   }
 }
 
 // ---------- 视图切换 ----------
-function showGame(){ document.getElementById('lobby').classList.remove('active'); document.getElementById('game').classList.add('active'); }
+function showGame(){
+  document.getElementById('lobby').classList.remove('active');
+  document.getElementById('game').classList.add('active');
+
+}
 function showMsg(text, isErr){ const el=document.getElementById('lobbyMsg'); el.textContent=text; el.style.color=isErr?'#ffb3b3':'#dfffdf'; }
 
 function nameOf(seat){ const p = state && state.players.find(x=>x.seat===seat); return p ? p.name : ('座位'+seat); }
@@ -58,7 +72,8 @@ function isHost(){ return state && state.selfSeat === 0; }
 // 片数显示：整数不带小数，四分之一片保留两位
 function fmtPts(n){
   const v = Math.round((n||0)*100)/100;
-  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+  // 包牌会分出 37.5 这种半片：显示一位就够，别写成 37.50
+  return String(parseFloat(v.toFixed(2)));
 }
 // 累计输赢小标签（下一局起挂在每个玩家信息框里）
 function scoreChip(n){
@@ -71,6 +86,8 @@ function scoreChip(n){
 // ---------- 渲染总入口 ----------
 function render(){
   if(!state) return;
+  // 只有真正开打之后才要求横屏：等待房间竖屏也能加机器人、退房、看规则
+  document.body.classList.toggle('in-game', state.phase !== 'waiting');
   document.getElementById('roomCode').textContent='房间 '+state.roomId;
   // 顶栏的「金」：文字旁边直接放一张牌，比只写"七筒"更直观
   const ji = document.getElementById('jokerInfo');
@@ -96,15 +113,17 @@ function render(){
   // 面板路由
   setOverlay('waitingPanel', state.phase==='waiting');
   setOverlay('swapPanel', state.phase==='swap');
-  if(state.phase==='ended'){ setOverlay('resultModal', true); showResult(); }
-  else setOverlay('resultModal', false);
+  // 胡牌：先让特效放完（或点一下跳过），再弹结算面板，别让"混一色"三个字压住整张牌谱
+  if(state.phase==='ended'){ scheduleResult(); }
+  else { clearTimeout(resultTimer); setOverlay('resultModal', false); }
 
-  if(state.phase==='waiting'){ renderWaiting(); return; }
+  if(state.phase==='waiting'){ renderWaiting(); requestAnimationFrame(placeSocial); return; }
   if(state.phase==='swap'){ renderSwap(); }
 
   renderTable();
   renderActions();
   renderLog();
+  requestAnimationFrame(placeSocial);
 }
 function setOverlay(id, show){ const el=document.getElementById(id); if(show) el.classList.add('show'); else el.classList.remove('show'); }
 
@@ -898,3 +917,899 @@ document.getElementById('addBotBtn').onclick=()=>send({t:'addBot'});
 document.getElementById('removeBotBtn').onclick=()=>send({t:'removeBot'});
 
 connect();
+
+/* ============================================================
+   v11：音效 · 大牌特效 · 快捷表情
+   - 音效全部用 Web Audio 现场合成，不依赖任何 mp3 文件
+     （离线可用、不增加部署体积、不会被运营商/代理压成半截）
+   - 事件由服务端随 state 一起下发（msg.events），所以碰/杠/大牌分得清
+   ============================================================ */
+
+/* ---------------- 中文报牌语音：索引表 ---------------- */
+// key -> [在 voice.mp3 里的起始秒, 时长秒]。由 tools/make-voice.py 生成，勿手改。
+/*VOICE_INDEX_BEGIN*/
+const VOICE_INDEX = {"1m":[0.0,0.478],"2m":[0.478,0.505],"3m":[0.983,0.513],"4m":[1.496,0.531],"5m":[2.027,0.445],"6m":[2.472,0.492],"7m":[2.964,0.523],"8m":[3.487,0.482],"9m":[3.969,0.482],"1s":[4.451,0.516],"2s":[4.967,0.531],"3s":[5.498,0.57],"4s":[6.068,0.584],"5s":[6.652,0.5],"6s":[7.152,0.549],"7s":[7.701,0.549],"8s":[8.25,0.53],"9s":[8.78,0.525],"1p":[9.305,0.53],"2p":[9.835,0.543],"3p":[10.378,0.579],"4p":[10.957,0.554],"5p":[11.511,0.533],"6p":[12.044,0.538],"7p":[12.582,0.547],"8p":[13.129,0.552],"9p":[13.681,0.569],"hua":[14.25,0.279],"peng":[14.529,0.344],"chi":[14.873,0.331],"gang":[15.204,0.311],"angang":[15.515,0.465],"bugang":[15.98,0.435],"ting":[16.415,0.541],"jinkan":[16.956,0.503],"hu":[17.459,0.329],"zimo":[17.788,0.46],"qiangjin":[18.248,0.493],"qianggang":[18.741,0.759],"drawgame":[19.5,0.547],"qingyise":[20.047,0.643],"hunyise":[20.69,0.597],"jinlong":[21.287,0.493],"jinque":[21.78,0.523],"duidui":[22.303,0.674],"duidui_jin":[22.977,1.23],"sanjindao":[24.207,0.651],"tianhu":[24.858,0.584]};
+/*VOICE_INDEX_END*/
+
+/* ---------------- 音效引擎 ---------------- */
+const Sound = (() => {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  let ac = null, master = null, noiseBuf = null;
+  let muted = false;
+  try { muted = localStorage.getItem('fz_mute') === '1'; } catch (e) { /* 隐私模式 */ }
+  const lastAt = {};
+
+  /* ---- 报牌语音（一条 mp3 精灵，按下标切片播） ---- */
+  let voiceBuf = null, voiceState = 'idle';   // idle / loading / ready / fail
+  let voiceOn = true;
+  try { voiceOn = localStorage.getItem('fz_voice') !== '0'; } catch (e) { /* 隐私模式 */ }
+  let curVoice = null;
+  const VOICE_URL = (typeof window.__VOICE_DATA === 'string' && window.__VOICE_DATA)
+    ? window.__VOICE_DATA : 'voice/voice.mp3';
+
+  function ctx() {
+    if (!AC) return null;
+    if (!ac) {
+      ac = new AC();
+      const comp = ac.createDynamicsCompressor();
+      comp.threshold.value = -16; comp.knee.value = 16; comp.ratio.value = 5;
+      comp.attack.value = 0.004; comp.release.value = 0.2;
+      master = ac.createGain();
+      master.gain.value = muted ? 0 : 0.9;
+      master.connect(comp); comp.connect(ac.destination);
+      const len = Math.floor(ac.sampleRate * 1.0);
+      noiseBuf = ac.createBuffer(1, len, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    }
+    if (ac.state === 'suspended') ac.resume();
+    return ac;
+  }
+
+  // 牌磕在桌面上的"啪"：噪声过带通 + 木头闷响
+  function clack(t, o) {
+    const f = o.f || 1500, g = o.g == null ? 0.2 : o.g, dur = o.dur || 0.05, q = o.q || 1.2;
+    const src = ac.createBufferSource(); src.buffer = noiseBuf;
+    src.playbackRate.value = 0.85 + Math.random() * 0.4;
+    const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = f; bp.Q.value = q;
+    const gn = ac.createGain();
+    gn.gain.setValueAtTime(0.0001, t);
+    gn.gain.linearRampToValueAtTime(g, t + 0.004);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(bp); bp.connect(gn); gn.connect(master);
+    src.start(t); src.stop(t + dur + 0.03);
+    if (o.thud) {
+      const os = ac.createOscillator(); os.type = 'sine';
+      os.frequency.setValueAtTime(o.thud, t);
+      os.frequency.exponentialRampToValueAtTime(o.thud * 0.55, t + 0.13);
+      const g2 = ac.createGain();
+      g2.gain.setValueAtTime(0.0001, t);
+      g2.gain.linearRampToValueAtTime(g * 0.85, t + 0.006);
+      g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+      os.connect(g2); g2.connect(master); os.start(t); os.stop(t + 0.17);
+    }
+  }
+
+  function tone(t, freq, dur, o) {
+    o = o || {};
+    const os = ac.createOscillator(); os.type = o.type || 'triangle';
+    os.frequency.setValueAtTime(freq, t);
+    if (o.to) os.frequency.exponentialRampToValueAtTime(o.to, t + dur);
+    const gn = ac.createGain();
+    const g = o.g == null ? 0.15 : o.g;
+    gn.gain.setValueAtTime(0.0001, t);
+    gn.gain.linearRampToValueAtTime(g, t + (o.attack || 0.008));
+    gn.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    os.connect(gn); gn.connect(master);
+    os.start(t); os.stop(t + dur + 0.02);
+  }
+
+  function fanfare(t, big) {
+    const notes = big ? [523.25, 659.25, 783.99, 1046.5, 1318.5] : [659.25, 783.99, 1046.5];
+    const step = big ? 0.1 : 0.085;
+    notes.forEach((f, i) => {
+      tone(t + i * step, f, 0.45, { type: 'triangle', g: 0.13 });
+      tone(t + i * step, f * 2, 0.3, { type: 'sine', g: 0.045 });
+    });
+  }
+
+  // 铜锣：一堆不成谐波的正弦叠加 + 金属沙声，比单纯"叮"更像胡牌
+  function gong(t, g) {
+    g = g == null ? 0.42 : g;
+    [98, 146.8, 196, 261.6, 392, 523.3].forEach((f, i) => {
+      const os = ac.createOscillator(); os.type = 'sine';
+      os.frequency.setValueAtTime(f * 1.008, t);
+      os.frequency.exponentialRampToValueAtTime(f * 0.968, t + 2.4);
+      const gn = ac.createGain();
+      gn.gain.setValueAtTime(0.0001, t);
+      gn.gain.linearRampToValueAtTime(g / (1.4 + i * 0.85), t + 0.012);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t + 2.6);
+      os.connect(gn); gn.connect(master); os.start(t); os.stop(t + 2.7);
+    });
+    const src = ac.createBufferSource(); src.buffer = noiseBuf;
+    const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2200; bp.Q.value = 0.7;
+    const gn = ac.createGain();
+    gn.gain.setValueAtTime(0.0001, t);
+    gn.gain.linearRampToValueAtTime(g * 0.26, t + 0.02);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t + 1.1);
+    src.connect(bp); bp.connect(gn); gn.connect(master); src.start(t); src.stop(t + 1.2);
+  }
+
+  /* ---- 语音：加载 / 打断 / 按优先级播 ---- */
+  // 一次性把整条 mp3 解码进内存，之后每句都是 0 延迟切片，不像 TTS 那样现合成
+  function loadVoice() {
+    if (voiceState === 'loading' || voiceState === 'ready' || voiceState === 'fail') return;
+    let c;
+    try { c = ctx(); } catch (e) { voiceState = 'fail'; return; }
+    if (!c || !c.decodeAudioData) { voiceState = 'fail'; return; }
+    voiceState = 'loading';
+    fetch(VOICE_URL)
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+      .then((ab) => new Promise((ok, no) => {
+        const p = c.decodeAudioData(ab, ok, no);   // 老 Safari 只认回调式
+        if (p && p.then) p.then(ok, no);
+      }))
+      .then((b) => { voiceBuf = b; voiceState = 'ready'; })
+      .catch(() => { voiceState = 'fail'; });
+  }
+
+  function stopVoice() {
+    if (curVoice && curVoice.src) {
+      try { curVoice.src.onended = null; curVoice.src.stop(); } catch (e) { /* 已播完 */ }
+    }
+    curVoice = null;
+  }
+
+  function playVoice(key, prio, gain) {
+    const idx = VOICE_INDEX[key];
+    if (!voiceBuf || !idx) return;
+    const t = ac.currentTime + 0.008;
+    const src = ac.createBufferSource(); src.buffer = voiceBuf;
+    const gn = ac.createGain();
+    const dur = idx[1];
+    gn.gain.setValueAtTime(gain, t);
+    gn.gain.setValueAtTime(gain, t + Math.max(0, dur - 0.07));   // 收尾 70ms 淡出，防削波
+    gn.gain.linearRampToValueAtTime(0.0001, t + dur);
+    src.connect(gn); gn.connect(master);
+    src.start(t, idx[0], dur);
+    curVoice = { src, prio, key };
+    src.onended = () => { if (curVoice && curVoice.src === src) curVoice = null; };
+  }
+
+  // prio 1=牌名 2=动作 3=胡牌。后来的优先级不低于当前才插播，否则丢掉（不排队，避免报牌越拖越晚）
+  function say(key, opt) {
+    if (!voiceOn) return;
+    opt = opt || {};
+    const prio = opt.prio || 1;
+    if (opt.delay) { setTimeout(() => say(key, Object.assign({}, opt, { delay: 0 })), opt.delay); return; }
+    if (voiceState === 'idle') loadVoice();
+    if (voiceState !== 'ready' || muted) return;
+    if (curVoice && curVoice.prio > prio) return;
+    stopVoice();
+    playVoice(key, prio, opt.gain == null ? 0.9 : opt.gain);
+  }
+
+  // 连读：牌型 + 动作（"清一色！……自摸！"），间隔按上一句真实时长算
+  function saySeq(keys, prio, gain) {
+    let d = 0;
+    keys.forEach((k) => {
+      if (!k) return;
+      const idx = VOICE_INDEX[k];
+      if (!idx) return;
+      say(k, { prio, gain, delay: d });
+      d += idx[1] * 1000 + 80;
+    });
+  }
+
+  const P = {
+    // 界面/系统
+    point() { const t = ac.currentTime; tone(t, 880, 0.07, { type: 'square', g: 0.05 }); },
+    deal() {
+      const t = ac.currentTime + 0.02;
+      for (let i = 0; i < 12; i++) clack(t + i * 0.05 + Math.random() * 0.02, { f: 1000 + Math.random() * 900, g: 0.07, dur: 0.04 });
+    },
+    dice() {
+      const t = ac.currentTime + 0.01;
+      for (let i = 0; i < 16; i++) clack(t + Math.random() * 0.7, { f: 900 + Math.random() * 1700, g: 0.055 + Math.random() * 0.05, dur: 0.035 });
+      const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+      const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400; bp.Q.value = 0.6;
+      const gn = ac.createGain();
+      gn.gain.setValueAtTime(0.0001, t);
+      gn.gain.linearRampToValueAtTime(0.055, t + 0.06);
+      gn.gain.setValueAtTime(0.055, t + 0.5);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t + 0.72);
+      src.connect(bp); bp.connect(gn); gn.connect(master); src.start(t); src.stop(t + 0.76);
+    },
+    swap() {
+      const t = ac.currentTime;
+      for (let i = 0; i < 3; i++) clack(t + i * 0.06, { f: 1800, g: 0.09, dur: 0.05 });
+      tone(t + 0.22, 880, 0.2, { type: 'sine', g: 0.07 });
+      tone(t + 0.22, 1320, 0.2, { type: 'sine', g: 0.04 });
+    },
+    joker() {
+      const t = ac.currentTime;
+      tone(t, 1046.5, 0.55, { type: 'sine', g: 0.13 });
+      tone(t + 0.06, 1568, 0.6, { type: 'sine', g: 0.08 });
+      tone(t + 0.12, 2093, 0.55, { type: 'sine', g: 0.04 });
+    },
+    // 牌桌
+    draw(o) { const t = ac.currentTime; clack(t, { f: o && o.me ? 2000 : 2700, g: o && o.me ? 0.13 : 0.06, dur: 0.04 }); },
+    discard() { const t = ac.currentTime; clack(t, { f: 1300, g: 0.23, dur: 0.06, thud: 120 }); },
+    peng() { const t = ac.currentTime; clack(t, { f: 1100, g: 0.25, dur: 0.06, thud: 135 }); clack(t + 0.08, { f: 900, g: 0.2, dur: 0.07, thud: 110 }); },
+    chi() { const t = ac.currentTime; clack(t, { f: 1900, g: 0.13, dur: 0.05 }); clack(t + 0.055, { f: 1500, g: 0.15, dur: 0.05 }); },
+    gang() { const t = ac.currentTime; [0, 0.06, 0.12].forEach((d, i) => clack(t + d, { f: 900 + i * 170, g: 0.22, dur: 0.06, thud: 120 })); },
+    angang() { const t = ac.currentTime; [0, 0.07, 0.14, 0.21].forEach((d, i) => clack(t + d, { f: 780 + i * 140, g: 0.21, dur: 0.07, thud: 105 })); },
+    bugang() { const t = ac.currentTime; [0, 0.07, 0.14, 0.21].forEach((d, i) => clack(t + d, { f: 820 + i * 150, g: 0.22, dur: 0.07, thud: 110 })); },
+    ting() { const t = ac.currentTime; tone(t, 1318.5, 0.3, { type: 'sine', g: 0.1 }); tone(t + 0.09, 1760, 0.35, { type: 'sine', g: 0.07 }); },
+    jinkan() { gong(ac.currentTime, 0.3); },
+    hu() { fanfare(ac.currentTime + 0.02, false); },
+    bigwin() {
+      const t = ac.currentTime + 0.02;
+      gong(t, 0.5);
+      fanfare(t + 0.28, true);
+      tone(t + 0.9, 2093, 1.2, { type: 'sine', g: 0.05 });
+    },
+    drawgame() {
+      const t = ac.currentTime;
+      tone(t, 392, 0.3, { type: 'triangle', g: 0.1 });
+      tone(t + 0.18, 311.1, 0.42, { type: 'triangle', g: 0.1 });
+      tone(t + 0.36, 233.1, 0.6, { type: 'triangle', g: 0.09 });
+    },
+    // 表情（每个性格给一段不同的短音）
+    emoji_hurry() {
+      const t = ac.currentTime;
+      [1200, 1500, 1200].forEach((f, i) => tone(t + i * 0.1, f, 0.07, { type: 'square', g: 0.055 }));
+    },
+    emoji_help() {
+      const t = ac.currentTime;
+      for (let i = 0; i < 5; i++) tone(t + i * 0.16, i % 2 ? 988 : 740, 0.14, { type: 'square', g: 0.05 });
+    },
+    emoji_kneel() {
+      const t = ac.currentTime;
+      // 两声"求——求——"，每声都往下坠，最后叹一口气
+      [0, 0.3].forEach((d, i) => {
+        tone(t + d, i ? 620 : 700, 0.26, { type: 'sine', to: 430, g: 0.115 });
+        tone(t + d, i ? 310 : 350, 0.26, { type: 'triangle', to: 215, g: 0.05 });
+      });
+      tone(t + 0.66, 300, 0.55, { type: 'sine', to: 175, g: 0.075 });
+    },
+    emoji_who() {
+      const t = ac.currentTime;
+      tone(t, 110, 0.5, { type: 'sawtooth', g: 0.13 });
+      tone(t, 165, 0.5, { type: 'sawtooth', g: 0.09 });
+      clack(t, { f: 700, g: 0.16, dur: 0.09, thud: 90 });
+    }
+  };
+
+  return {
+    get muted() { return muted; },
+    setMuted(v) {
+      muted = !!v;
+      try { localStorage.setItem('fz_mute', muted ? '1' : '0'); } catch (e) { /* ignore */ }
+      const c = ctx();
+      if (c) master.gain.setTargetAtTime(muted ? 0 : 0.9, c.currentTime, 0.02);
+      if (!muted) this.play('point');
+    },
+    unlock() {
+      try {
+        const c = ctx();
+        if (c && c.state === 'suspended') c.resume();
+        if (c) loadVoice();          // 首次点击就把语音包解好，打第一张牌时不用等
+      } catch (e) { /* ignore */ }
+    },
+    say, saySeq,
+    get voiceOn() { return voiceOn; },
+    get voiceState() { return voiceState; },
+    setVoiceOn(v) {
+      voiceOn = !!v;
+      try { localStorage.setItem('fz_voice', voiceOn ? '1' : '0'); } catch (e) { /* ignore */ }
+      if (!voiceOn) { stopVoice(); return; }
+      loadVoice();
+      // 刚点开时语音包可能还在解码，等它就绪再放一声示例，别让按钮点下去没反应
+      let tries = 0;
+      const demo = () => {
+        if (!voiceOn) return;
+        if (voiceState === 'ready') { say('1m', { prio: 3 }); return; }
+        if (voiceState === 'fail' || tries++ > 12) return;
+        setTimeout(demo, 150);
+      };
+      demo();
+    },
+    play(name, opt) {
+      if (muted) return;
+      let c;
+      try { c = ctx(); } catch (e) { return; }
+      if (!c || ac.state !== 'running') return;
+      const now = performance.now();
+      if (lastAt[name] && now - lastAt[name] < 32) return; // 同一音效防抖：避免瞬移式连点糊成噪音
+      lastAt[name] = now;
+      try { P[name] && P[name](opt); } catch (e) { /* 音频失败不影响牌局 */ }
+    }
+  };
+})();
+
+// 首次交互解锁音频（iOS/Safari 必须在用户手势里创建 AudioContext）
+['pointerdown', 'touchstart', 'keydown'].forEach((ev) => {
+  document.addEventListener(ev, () => Sound.unlock(), { passive: true });
+});
+document.addEventListener('visibilitychange', () => { if (!document.hidden) Sound.unlock(); });
+
+/* ---------------- 牌局事件 → 音效 / 特效 ---------------- */
+// 牌 → 语音 key：数牌 1m..9p，花牌统一念"花"
+function tileVoiceKey(tile) {
+  if (tile == null || tile < 0) return null;
+  if (tile >= 27) return 'hua';
+  return ((tile % 9) + 1) + (tile < 9 ? 'm' : tile < 18 ? 's' : 'p');
+}
+// 牌型标签 → 语音 key
+const LABEL_VOICE = {
+  '纯清一色': 'qingyise', '混一色': 'hunyise', '金龙': 'jinlong', '金雀': 'jinque',
+  '对对胡（有金）': 'duidui_jin', '对对胡': 'duidui', '三金倒': 'sanjindao', '天胡': 'tianhu',
+};
+
+function onGameEvent(ev) {
+  if (!ev || !ev.ev) return;
+  switch (ev.ev) {
+    case 'deal': Sound.play('deal'); break;
+    case 'dice': Sound.play('dice'); break;
+    case 'swap': Sound.play('swap'); break;
+    case 'joker': Sound.play('joker'); break;
+    case 'draw': Sound.play('draw', { me: ev.seat === mySeat }); break;
+    case 'discard':
+      Sound.play('discard');
+      Sound.say(tileVoiceKey(ev.tile), { prio: 1, gain: ev.seat === mySeat ? 1 : 0.7 });
+      break;
+    case 'peng': Sound.play('peng'); Sound.say('peng', { prio: 2 }); break;
+    case 'chi': Sound.play('chi'); Sound.say('chi', { prio: 2 }); break;
+    case 'gang':
+      Sound.play('gang'); Sound.say('gang', { prio: 2 }); break;
+    case 'angang':
+      Sound.play('angang'); Sound.say('angang', { prio: 2 }); break;
+    case 'bugang':
+      Sound.play('bugang'); Sound.say('bugang', { prio: 2 }); break;
+    case 'ting': Sound.play('ting'); Sound.say('ting', { prio: 2 }); break;
+    case 'jinkan': Sound.play('jinkan'); Sound.say('jinkan', { prio: 2 }); break;
+    case 'hu': {
+      Sound.play(ev.big ? 'bigwin' : 'hu');
+      showWinFX(ev);
+      // 有牌型先喊牌型再喊胡法（"清一色！……自摸！"），没有就单喊一个
+      const types = (ev.labels || []).map((l) => LABEL_VOICE[l]).filter(Boolean);
+      const act = ev.zimo ? 'zimo' : ev.qiangjin ? 'qiangjin' : ev.qianggang ? 'qianggang' : 'hu';
+      Sound.saySeq(types.length ? [types[0], act] : [act], 3);
+      break;
+    }
+    case 'drawgame': Sound.play('drawgame'); Sound.say('drawgame', { prio: 3 }); break;
+    default: break;
+  }
+}
+
+/* ---------------- 大牌特效 ---------------- */
+let fxTimer = null;
+let resultHoldUntil = 0;   // 特效播完之前不弹结算面板
+let resultTimer = null;
+
+function clearFX() {
+  const layer = document.getElementById('fxLayer');
+  clearTimeout(fxTimer);
+  if (layer) { layer.className = 'fx-layer'; layer.innerHTML = ''; layer.onclick = null; }
+}
+
+// 急性子点一下就跳过庆祝，直接看牌谱
+function skipFX() {
+  clearFX();
+  resultHoldUntil = 0;
+  clearTimeout(resultTimer);
+  if (state && state.phase === 'ended') { setOverlay('resultModal', true); showResult(); }
+}
+
+// 结算面板：等特效放完再出现；期间再来 state 也不会叠计时器
+function scheduleResult() {
+  const wait = Math.max(0, resultHoldUntil - Date.now());
+  setOverlay('resultModal', false);
+  clearTimeout(resultTimer);
+  if (wait > 0) {
+    resultTimer = setTimeout(() => {
+      if (state && state.phase === 'ended') { setOverlay('resultModal', true); showResult(); }
+    }, wait);
+  } else {
+    setOverlay('resultModal', true);
+    showResult();
+  }
+}
+function showWinFX(ev) {
+  const layer = document.getElementById('fxLayer');
+  if (!layer) return;
+  const bonus = ev.bonus || 0;
+  // 1=普通胡（小闪一下）2=有奖励的大牌 3=48 片级大牌（清一色/混一色/金龙）
+  const lv = !ev.big ? 1 : (bonus >= 24 ? 3 : 2);
+  clearTimeout(fxTimer);
+  layer.innerHTML = '';
+  layer.className = 'fx-layer show' + (lv === 3 ? ' shake' : '');
+  resultHoldUntil = Date.now() + (lv === 3 ? 3100 : lv === 2 ? 2500 : 1150);
+  layer.onclick = skipFX;
+  // 大牌面前先清掉表情气泡，别跟"金雀"抢位置
+  const eb = document.getElementById('emojiLayer');
+  if (eb) eb.innerHTML = '';
+
+  const flash = document.createElement('div'); flash.className = 'fx-flash'; layer.appendChild(flash);
+  if (lv > 1) {
+    const rays = document.createElement('div'); rays.className = 'fx-rays'; layer.appendChild(rays);
+    const n = lv === 3 ? 36 : 22;
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement('span');
+      c.className = 'fx-coin';
+      c.textContent = i % 5 === 0 ? '✦' : (i % 3 === 0 ? '●' : '金');
+      c.style.left = (Math.random() * 100) + 'vw';
+      c.style.fontSize = (12 + Math.random() * 16) + 'px';
+      c.style.animationDuration = (1.7 + Math.random() * 1.3) + 's';
+      c.style.animationDelay = (Math.random() * 0.8) + 's';
+      layer.appendChild(c);
+    }
+  }
+
+  const box = document.createElement('div'); box.className = 'fx-title';
+  const kind = ev.qiangjin ? '抢金' : ev.qianggang ? '抢杠胡' : ev.zimo ? '自摸' : '胡牌';
+  const labels = ev.labels || [];
+  const big = document.createElement('div');
+  big.className = 'fx-big' + (lv === 1 ? ' lv1' : '');
+  big.textContent = (lv === 1 || !labels.length) ? (lv === 1 ? '胡' : kind) : labels[0];
+  box.appendChild(big);
+  const sub = document.createElement('div'); sub.className = 'fx-sub';
+  sub.textContent = [ev.name || '', kind].concat(labels.slice(lv === 1 ? 0 : 1)).filter(Boolean).join(' · ');
+  box.appendChild(sub);
+  const fan = document.createElement('div'); fan.className = 'fx-fan';
+  fan.innerHTML = `<b>${ev.fan == null ? '' : ev.fan}</b> 片`;
+  box.appendChild(fan);
+  layer.appendChild(box);
+
+  fxTimer = setTimeout(() => { layer.className = 'fx-layer'; layer.innerHTML = ''; },
+    lv === 3 ? 3400 : lv === 2 ? 2800 : 1500);
+}
+
+/* ---------------- 快捷表情 ---------------- */
+const EMOJIS = [
+  { id: 'hurry', icon: '⏰', label: '打快点打快点', text: '打快点打快点', tone: 'warn' },
+  { id: 'help',  icon: '🆘', label: '救命', text: '救命', tone: 'red' },
+  { id: 'kneel', icon: '🙏', label: '别做了求求了', text: '别做了\n求求了', tone: 'plead' },
+  { id: 'who',   icon: '😤', label: '还有谁', text: '还有谁', tone: 'swag' }
+];
+
+function buildEmojiPanel() {
+  const grid = document.getElementById('emojiGrid');
+  if (!grid || grid.dataset.ready) return;
+  grid.dataset.ready = '1';
+  EMOJIS.forEach((e) => {
+    const b = document.createElement('button');
+    b.className = 'ep-item';
+    b.dataset.id = e.id;
+    b.innerHTML = `<span class="ep-ico">${e.icon}</span><span class="ep-lab">${e.label}</span>`;
+    b.onclick = (ev) => { if (ev) ev.stopPropagation(); sendEmoji(e.id); };
+    grid.appendChild(b);
+  });
+}
+
+let emojiCoolUntil = 0;
+function sendEmoji(id) {
+  const btn = document.getElementById('emojiBtn');
+  const now = Date.now();
+  if (now < emojiCoolUntil) {  // 连点太快：抖一下，不重复发
+    if (btn) { btn.classList.add('shake'); setTimeout(() => btn.classList.remove('shake'), 320); }
+    return;
+  }
+  emojiCoolUntil = now + 1100;
+  send({ t: 'emoji', id });
+  Sound.play('point');
+  toggleEmojiPanel(false);
+}
+
+function onEmoji(seat, id) {
+  if (seat == null || !id) return;
+  Sound.play('emoji_' + id);
+  showEmojiBubble(seat, id);
+}
+
+// 气泡贴着说话人的位置弹出来
+function seatAnchor(seat) {
+  const selfSeat = state ? state.selfSeat : 0;
+  if (seat === selfSeat) {
+    const h = document.getElementById('hand');
+    const r = h.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top - 6, cls: 'pos-self', tail: '50%' };
+  }
+  const idx = (seat - selfSeat + 4) % 4;
+  const sel = ['', '.opp-right', '.opp-top', '.opp-left'][idx];
+  const el = document.querySelector(sel);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  if (idx === 1) return { x: r.left - 8, y: r.top + r.height / 2, cls: 'pos-right', tail: 'calc(100% - 14px)' };
+  if (idx === 2) return { x: r.left + r.width / 2, y: r.bottom + 6, cls: 'pos-top', tail: '50%' };
+  return { x: r.right + 8, y: r.top + r.height / 2, cls: 'pos-left', tail: '14px' };
+}
+
+let bubbleTimers = {};
+function showEmojiBubble(seat, id) {
+  const e = EMOJIS.find((x) => x.id === id);
+  const layer = document.getElementById('emojiLayer');
+  if (!e || !layer) return;
+  const old = layer.querySelector(`[data-seat="${seat}"]`);
+  if (old) old.remove();
+  clearTimeout(bubbleTimers[seat]);
+
+  const b = document.createElement('div');
+  b.className = 'emoji-bubble tone-' + e.tone;   // 配色类名必须带 tone- 前缀，否则四种语气全变白底
+  b.dataset.seat = String(seat);
+  const inner = document.createElement('div');
+  inner.className = 'eb-inner';
+  const ico = document.createElement('span'); ico.className = 'eb-ico'; ico.textContent = e.icon;
+  const txt = document.createElement('span'); txt.className = 'eb-txt'; txt.textContent = e.text;
+  inner.appendChild(ico); inner.appendChild(txt);
+  b.appendChild(inner);
+
+  const a = seatAnchor(seat);
+  if (!a) return;
+  b.style.left = Math.round(a.x) + 'px';
+  b.style.top = Math.round(a.y) + 'px';
+  b.style.setProperty('--tail', a.tail);
+  b.classList.add(a.cls);
+  layer.appendChild(b);
+
+  bubbleTimers[seat] = setTimeout(() => {
+    b.classList.add('out');
+    setTimeout(() => b.remove(), 320);
+  }, 2800);
+}
+
+/* ---------------- 面板 / 按钮 ---------------- */
+function placeSocial() {
+  const a = document.getElementById('actions');
+  const s = document.getElementById('social');
+  if (!a || !s) return;
+  const r = a.getBoundingClientRect();
+  if (!r.height) return;
+  const h = s.offsetHeight || 132;       // 三个按钮（表情 / 音效 / 语音）
+  const top = Math.round(r.top + r.height / 2 - h / 2);
+  const maxTop = window.innerHeight - h - 8;
+  s.style.top = Math.max(6, Math.min(top, maxTop)) + 'px';
+}
+
+function toggleEmojiPanel(force) {
+  const p = document.getElementById('emojiPanel');
+  const btn = document.getElementById('emojiBtn');
+  if (!p || !btn) return;
+  const on = force == null ? !p.classList.contains('show') : !!force;
+  p.classList.toggle('show', on);
+  const bd = document.getElementById('emojiBackdrop');
+  if (bd) bd.classList.toggle('show', on);
+  btn.textContent = on ? '✕' : '😀';
+  if (!on) return;
+  const r = btn.getBoundingClientRect();
+  p.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+  const h = p.offsetHeight;
+  if (r.top - 10 >= h) {           // 按钮上方放得下 → 住在上面
+    p.style.bottom = Math.round(window.innerHeight - r.top + 6) + 'px';
+    p.style.top = 'auto';
+  } else {                          // 放不下 → 贴到顶部
+    p.style.top = '8px';
+    p.style.bottom = 'auto';
+  }
+}
+
+(function initSocial() {
+  const btn = document.getElementById('emojiBtn');
+  const mute = document.getElementById('muteBtn');
+  if (btn) {
+    buildEmojiPanel();
+    btn.addEventListener('click', (e) => { e.stopPropagation(); toggleEmojiPanel(); });
+  }
+  if (mute) {
+    const sync = () => {
+      mute.textContent = Sound.muted ? '🔇' : '🔊';
+      mute.classList.toggle('off', Sound.muted);
+      mute.title = Sound.muted ? '音效已关（点一下打开）' : '音效已开（点一下关闭）';
+    };
+    mute.addEventListener('click', (e) => { e.stopPropagation(); Sound.setMuted(!Sound.muted); sync(); });
+    sync();
+  }
+  const voice = document.getElementById('voiceBtn');
+  if (voice) {
+    const syncV = () => {
+      voice.classList.toggle('off', !Sound.voiceOn);
+      voice.title = Sound.voiceOn ? '报牌语音已开（点一下关闭）' : '报牌语音已关（点一下打开）';
+    };
+    voice.addEventListener('click', (e) => { e.stopPropagation(); Sound.setVoiceOn(!Sound.voiceOn); syncV(); });
+    syncV();
+  }
+  const bd = document.getElementById('emojiBackdrop');
+  if (bd) bd.addEventListener('click', () => toggleEmojiPanel(false));
+  document.addEventListener('click', (e) => {
+    const p = document.getElementById('emojiPanel');
+    if (!p || !p.classList.contains('show')) return;
+    if (p.contains(e.target) || (e.target.closest && e.target.closest('#emojiBtn'))) return;
+    toggleEmojiPanel(false);
+  });
+  window.addEventListener('resize', () => { placeSocial(); toggleEmojiPanel(false); });
+  window.addEventListener('orientationchange', () => setTimeout(placeSocial, 220));
+  placeSocial();
+})();
+
+/* ============================================================
+   v11：规则说明（首页入口）+ 从房间返回首页
+   ============================================================ */
+
+/* ---- 规则正文：改这里就能改弹窗内容，不用动 HTML ---- */
+const RULE_SECTIONS = [
+  {
+    t: '一分钟上手',
+    h: `
+      <p><b>4 个人，17 张牌成胡</b>：5 组面子（顺子或刻子）＋ 1 对将。</p>
+      <ul>
+        <li>每人起手 <b>16 张</b>，庄家 <b>17 张</b>；开局先<b>换牌</b>、再<b>开金</b>，然后轮流摸打。</li>
+        <li><b>金是万能牌</b>，可以当任意一张数牌用；但金不能吃、不能碰、不能杠、不能点炮。</li>
+        <li><b>小胡只能自摸</b>。想靠别人打出的牌胡，必须是有奖励的<b>大牌</b>。</li>
+        <li>胡牌收 <b>3 份</b>：自摸三家各付，点炮也是三家各付，放炮的人不多付。</li>
+      </ul>
+      <span class="hl">第一次玩就记住两句：<b>金不能吃碰杠</b>、<b>能胡的人没表态前别抢着碰</b>。</span>
+    `
+  },
+  {
+    t: '牌库与花、金',
+    h: `
+      <ul>
+        <li>牌库 <b>144 张</b>：万 / 条 / 筒各 1-9，每种 4 张（108 张）＋ <b>花牌 36 张</b>。</li>
+        <li>花牌 = 春夏秋冬梅兰竹菊各 1 张，加上<b>东南西北中发白各 4 张</b>。福麻没有字牌，字牌全部当花，不参与面子。</li>
+        <li><b>花即分</b>：摸到花立刻亮出计 1 朵，并从牌尾补一张，补到不是花为止。</li>
+        <li><b>开金</b>：从牌尾翻一张数牌，<b>该种类 4 张全部是金</b>。翻出的这 1 张公示、不流通，所以场上实际能用的金是 <b>3 张</b>。</li>
+        <li>金可以打出去，而且打出的金<b>没人能吃碰胡</b>，是一张绝对安全牌。</li>
+      </ul>
+    `
+  },
+  {
+    t: '开局：发牌 → 换牌 → 开金',
+    h: `
+      <p><b>① 发牌</b>：庄家掷 2 颗骰子决定起抓位置，四家各 16 张，<b>庄家多 1 张 = 17 张</b>，然后补花。</p>
+      <p><b>② 换牌</b>（大乱斗特色）：庄家再摇一次 2 颗骰子，决定这轮往哪个方向换。</p>
+      <div class="rule-scroll"><table>
+        <tr><th>点数</th><th>怎么换</th></tr>
+        <tr><td>5 / 9</td><td>重摇</td></tr>
+        <tr><td>3 / 7 / 11</td><td>给<b>对家</b></td></tr>
+        <tr><td>2 / 6 / 10</td><td>给<b>下家</b></td></tr>
+        <tr><td>4 / 8 / 12</td><td>给<b>上家</b></td></tr>
+      </table></div>
+      <ul>
+        <li>四家各自选一门花色（万 / 条 / 筒），从这门里挑 <b>3 张</b>换出去，<b>环形传递</b>：你给出去的同时收到另一家的 3 张。</li>
+        <li>庄家是从自己的 <b>17 张</b>里挑 3 张，换完不再额外摸牌。</li>
+        <li>别人只看到「已选好」，看不到你选的是哪一门。</li>
+        <li><b>四家选的花色完全一样 → 这轮无效</b>，重新摇骰、重新换（不算一局结束，不涨连庄）。</li>
+        <li>换牌按<b>张</b>挑：手里两张 7 万，可以只换其中一张。30 秒没选，系统自动挑你手里最多的一门换出。</li>
+      </ul>
+      <p><b>③ 开金 + 庄家首打</b>：开金后庄家先打掉一张多余的牌，这一手进入<b>抢金窗口</b>（见下一节）；没有天胡就先打牌。</p>
+    `
+  },
+  {
+    t: '抢金：开局那一手',
+    h: `
+      <ul>
+        <li>庄家开金后打出第一张，<b>四家都能抢</b>——把开局翻出的那张<b>公示金</b>拿进手牌，16 + 1 = 17 张能成牌就抢金（<b>+8 片</b>）。</li>
+        <li><b>庄家也能抢</b>：打完首张手牌同样剩 16 张，条件与闲家完全一样，只是优先级排最后。</li>
+        <li>抢的永远是<b>公示金</b>，跟庄家打出的那张牌无关。庄家就算把金打出来，别人也不能拿这张弃牌胡。</li>
+        <li>抢金不是点炮，<b>任何牌型都能抢</b>；可以和大牌叠加，唯独不能叠三金倒。</li>
+      </ul>
+      <p><b>多家同时能抢，谁先抢？</b></p>
+      <ul>
+        <li>先比<b>叠加的大牌奖励</b>（抢金 8 ＋ 对对胡 / 混一色 / 清一色 / 金雀 / 金龙 / 无花胡），奖励大的先抢。</li>
+        <li>奖励一样大 → 按<b>逆时针</b>，从庄家下家开始，<b>庄家最后</b>。</li>
+      </ul>
+      <span class="hl"><b>抢金压住吃碰杠</b>：这一手只要有人能抢金，别家的吃 / 碰 / 杠一律先挂着。哪怕碰家手快先点了「碰」，也要等所有能抢金的人点「过」，或者直接被抢金胡掉。</span>
+      <p class="mini">天胡与抢金互斥：庄家这一手直接成牌就是天胡，没有抢金环节。</p>
+    `
+  },
+  {
+    t: '吃 · 碰 · 杠',
+    h: `
+      <div class="rule-scroll"><table>
+        <tr><th>动作</th><th>条件</th><th>朵数</th></tr>
+        <tr><td>吃</td><td>只能吃<b>上家</b>打的牌，同一门连着的三张</td><td>—</td></tr>
+        <tr><td>碰</td><td>任何人打的牌，你手里有 2 张相同</td><td>—</td></tr>
+        <tr><td>明杠</td><td>别人打第 4 张，你手里 3 张</td><td>1 朵</td></tr>
+        <tr><td>暗杠</td><td>自己回合，手里 4 张相同</td><td>2 朵</td></tr>
+        <tr><td>加杠</td><td>碰过的牌，之后摸到第 4 张</td><td>1 朵</td></tr>
+      </table></div>
+      <ul>
+        <li>杠完从牌尾补 1 张；<b>牌墙空了不能杠</b>。</li>
+        <li>副露最多 <b>5 组</b>；满 5 组后不能再吃碰杠，但<b>仍然可以胡</b>（大单调就是 5 组 + 手里 1 张）。</li>
+        <li>杠在牌型里只算 3 张，所以杠过之后仍然按 17 张判胡。</li>
+      </ul>
+      <span class="hl"><b>优先级：胡 &gt; 碰/杠 &gt; 吃。</b>只要有人能胡，别人点的「碰」只是申请，不立即生效；胡家点「过」故意不要，才轮到碰/杠，最后才是吃。所以不会出现「牌都要胡了被人碰走」。</span>
+      <ul>
+        <li>响应窗口 <b>30 秒</b>不表态自动判「过」。</li>
+        <li>多家同时能胡只算一家：从<b>放炮者的下家</b>开始按座位顺序，先轮到的胡。</li>
+      </ul>
+    `
+  },
+  {
+    t: '胡牌与大牌',
+    h: `
+      <p><b>牌型</b>：5 组面子 ＋ 1 对将，共 17 张。吃碰杠亮出去的每组都<b>锁定</b>，不能拆回手里重新组合。</p>
+      <p><b>自摸 vs 点炮</b>：自摸什么牌型都能胡；<b>点炮只认有奖励的大牌</b>——无花胡、对对胡、金龙、混一色、清一色、大单调（无金）。普通小胡、三金倒、纯金雀、金坎都不能点炮。</p>
+      <p><b>抢杠</b>：别人加杠时，你能凑成有奖励的大牌可以抢，<b>杠不成立</b>（退回碰），按<b>他家点炮</b>结算。抢杠本身没有额外奖励。</p>
+      <div class="rule-scroll"><table>
+        <tr><th>大牌</th><th>奖励</th><th>能否点炮</th></tr>
+        <tr><td>天胡</td><td>+8</td><td>只能自摸（仅庄家）</td></tr>
+        <tr><td>无花胡</td><td>+8</td><td>可以</td></tr>
+        <tr><td>抢金</td><td>+8</td><td>开局窗口</td></tr>
+        <tr><td>三金倒</td><td>+10</td><td>只能自摸</td></tr>
+        <tr><td>有金对对胡</td><td>+8</td><td>可以</td></tr>
+        <tr><td>无金对对胡</td><td>+12</td><td>可以</td></tr>
+        <tr><td>金雀（双金作将）</td><td>+12</td><td>自摸 / 抢金</td></tr>
+        <tr><td>金坎（卡金位）</td><td>+12</td><td>只能自摸</td></tr>
+        <tr><td>大单调（5 副露单钓）</td><td>+12</td><td>无金可以，剩金只能自摸</td></tr>
+        <tr><td>金龙（3 金成刻）</td><td>+24</td><td>可以</td></tr>
+        <tr><td>混一色</td><td>+24</td><td>可以</td></tr>
+        <tr><td>纯清一色</td><td>+48</td><td>可以</td></tr>
+      </table></div>
+      <p>多个大牌同时成立，<b>片数相加</b>。例：清一色 + 无金对对胡 = 48 + 12 = 60 片，再加基础片。</p>
+    `
+  },
+  {
+    t: '怎么算片',
+    h: `
+      <p><b>第一步：算朵数</b></p>
+      <p class="mini">朵数 = 花数 ＋ 明杠×1 ＋ 暗杠×2 ＋ 连庄×1 ＋（自摸且不是大牌 ? 1 : 0）＋（不是 0 花 ? 金的数量 : 0）</p>
+      <p><b>第二步：朵数换片</b></p>
+      <p>片数 = <b>向上取整（朵数 × 2 ÷ 5）</b>。例：10 朵 → 4 片，11 朵 → 5 片。</p>
+      <p><b>第三步：加奖励</b>：大牌奖励直接加在单家应付上。</p>
+      <span class="hl"><b>胡家永远收 3 份。</b>自摸三家各付；点炮也是三家各付，<b>放炮的人不多付</b>（这是福麻和很多麻将不一样的地方）。包牌是唯一例外，见下一节。</span>
+      <p><b>0 花胡</b>：每张金直接 +1 片（不进朵数），另外再加「无花胡 +8 片」。</p>
+      <div class="rule-scroll"><table>
+        <tr><th>牌型</th><th>单家应付</th><th>赢家总收</th></tr>
+        <tr><td>5 花 + 2 金 + 普通自摸</td><td>4 片</td><td>12 片</td></tr>
+        <tr><td>0 花 + 3 金 + 三金倒</td><td>21 片</td><td>63 片</td></tr>
+        <tr><td>15 花 + 混一色自摸</td><td>30 片</td><td>90 片</td></tr>
+        <tr><td>3 花 + 无金对对胡点炮</td><td>14 片</td><td>42 片</td></tr>
+      </table></div>
+    `
+  },
+  {
+    t: '包牌：喂牌要负责',
+    h: `
+      <p>有人做<b>清一色 / 混一色</b>，他每一手吃碰杠都是别人在帮他凑牌型。喂得越多，他做成的概率越大，所以<b>喂牌的人不能和旁观者出一样多</b>。只对清 / 混一色生效，对对胡、金雀等不包。</p>
+      <p><b>先看最后一手是谁喂的</b>：都已经吃了三手同花色，还往这个颜色上打，他再吃下去就报听了 —— 这一张的责任最明确，<b>哪怕他总共只喂了这一手，也担一半</b>。</p>
+      <p><b>再看是不是同一个人一路喂到底</b>：从头到尾都是他喂的（喂满 4 手以上），这个牌型就是他一手喂成的 → <b>全包</b>。</p>
+      <p><b>点炮时，「最后一手」由放炮者扮演</b>：最后那张是他打的，责任归他。</p>
+      <div class="rule-scroll"><table>
+        <tr><th>情况</th><th>怎么分（总额 = 3 份）</th></tr>
+        <tr><td>3 手 · 自摸</td><td>喂最后一手的人一半，另两家各 1/4</td></tr>
+        <tr><td>3 手 · 点炮</td><td>放炮者一半，另两家各 1/4</td></tr>
+        <tr><td>4 手以上全同一人 · 自摸</td><td>这个人<b>全包</b>，其余两家 0</td></tr>
+        <tr><td>4 手以上全同一人 · 别人点炮</td><td>放炮者一半，喂牌的人一半</td></tr>
+        <tr><td>4 手以上不同人 · 点炮</td><td>放炮者<b>全包</b>（没人能算「一手喂成」）</td></tr>
+      </table></div>
+      <p class="mini">例：B 把 A 喂成清一色，C 放炮 50 片/家（总额 150）。3 手时 C 付 75、B 付 37.5、第四家 37.5；如果这 4 手全是 B 喂的，则 C 付 75、B 付 75、第四家 0。</p>
+    `
+  },
+  {
+    t: '音效与报牌语音',
+    h: `
+      <p>牌桌右下角有三个按钮：<b>😀 表情</b>、<b>🔊 音效</b>、<b>语 报牌语音</b>，互不影响，可以只留语音不开音效。</p>
+      <ul>
+        <li><b>报牌语音</b>：谁打出什么牌就念什么（「三筒」「八万」），吃 / 碰 / 杠 / 暗杠 / 补杠 / 听牌 / 金坎 / 胡都会念。</li>
+        <li>胡牌时先念牌型再念胡法，比如「清一色！……自摸！」，大牌会配礼炮和撒金特效。</li>
+        <li>女声报牌，念的牌名和牌面上的字<b>完全一致</b>：「三筒」就念三筒。</li>
+        <li>语音包随程序一起下载（约 100KB），<b>不用联网、不耗流量</b>；第一次点屏幕就会预加载好，打第一张牌时不会卡。</li>
+        <li>嫌吵就点「语」关掉，设置会记住。</li>
+      </ul>
+    `
+  },
+  {
+    t: '容易踩的坑',
+    h: `
+      <ul>
+        <li><b>打金是安全的</b>：金打出去别人不能吃、碰、点炮。抢金抢的是公示金，跟这张弃牌无关。</li>
+        <li><b>报听目前只是标记</b>：不影响算钱，也没有「报听不能改牌」之类的限制。</li>
+        <li><b>一炮多响只算一家</b>：从放炮者下家开始按顺序，先轮到的胡，不是一起胡。</li>
+        <li><b>金坎一旦宣告，全场只能自摸</b>，谁都不能点炮，也不能再杠。</li>
+        <li><b>流局（臭庄）庄家连庄 +1</b>；换牌无效重摇不算一局，不涨连庄。</li>
+        <li><b>金坎 / 金雀 / 三金倒</b> 都要求「真的成牌 / 真的有那几张金」，不是凑个样子就算。</li>
+      </ul>
+    `
+  }
+];
+
+function buildRules() {
+  const body = document.getElementById('rulesBody');
+  if (!body || body.dataset.ready) return;
+  body.dataset.ready = '1';
+  RULE_SECTIONS.forEach((sec, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'rule-sec' + (i === 0 ? ' open' : '');
+    const btn = document.createElement('button');
+    btn.className = 'rule-h';
+    btn.type = 'button';
+    btn.innerHTML = `<span class="rule-n">${i + 1}</span><span class="rule-t">${sec.t}</span><span class="rule-arrow">▾</span>`;
+    btn.onclick = () => wrap.classList.toggle('open');
+    const c = document.createElement('div');
+    c.className = 'rule-c';
+    c.innerHTML = sec.h;
+    wrap.appendChild(btn);
+    wrap.appendChild(c);
+    body.appendChild(wrap);
+  });
+}
+
+function toggleRules(show) {
+  const m = document.getElementById('rulesModal');
+  if (!m) return;
+  const on = show == null ? !m.classList.contains('show') : !!show;
+  buildRules();
+  m.classList.toggle('show', on);
+  if (on) {
+    const body = document.getElementById('rulesBody');
+    if (body) body.scrollTop = 0;
+  }
+}
+
+(function initRules() {
+  const btn = document.getElementById('rulesBtn');
+  const close = document.getElementById('rulesClose');
+  const modal = document.getElementById('rulesModal');
+  if (btn) btn.addEventListener('click', (e) => { e.stopPropagation(); toggleRules(true); });
+  if (close) close.addEventListener('click', () => toggleRules(false));
+  if (modal) modal.addEventListener('click', (e) => { if (e.target === modal) toggleRules(false); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const m = document.getElementById('rulesModal');
+      if (m && m.classList.contains('show')) toggleRules(false);
+    }
+  });
+})();
+
+/* ---------------- 从房间返回首页 ---------------- */
+let leavingRoom = false;
+
+function backToLobby() {
+  if (leavingRoom) return;
+  if (state && state.phase !== 'waiting') return;   // 对局进行中不给退，避免把牌局弄散
+  leavingRoom = true;
+  const btn = document.getElementById('backLobbyBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '正在退出…'; }
+  if (ws && ws.readyState === 1) {
+    try { ws.send(JSON.stringify({ t: 'leave' })); } catch (e) { /* 发不出去就直接走 */ }
+  }
+  // 服务端没回（断网等）也照样回首页，不让按钮卡住
+  setTimeout(() => { if (leavingRoom) finishLeave(); }, 600);
+}
+
+function finishLeave() {
+  if (!leavingRoom && !state) return;   // 已经回过首页
+  leavingRoom = false;
+  if (ws) {
+    try { ws.onclose = null; ws.onmessage = null; ws.close(); } catch (e) { /* ignore */ }
+    ws = null;
+  }
+  outbox.length = 0;
+  state = null;
+  mySeat = null;
+  swapSelection = [];
+  swapSuit = null;
+  swapSubmitted = false;
+  curSwapId = -1;
+  ['waitingPanel', 'swapPanel', 'resultModal'].forEach((id) => setOverlay(id, false));
+  const g = document.getElementById('game');
+  const l = document.getElementById('lobby');
+  if (g) g.classList.remove('active');
+  if (l) l.classList.add('active');
+  document.body.classList.remove('in-game');
+  const hint = document.getElementById('waitHint');
+  if (hint) hint.textContent = '';
+  const btn = document.getElementById('backLobbyBtn');
+  if (btn) { btn.disabled = false; btn.textContent = '返回首页'; }
+  const ri = document.getElementById('roomInput');
+  if (ri) ri.value = '';
+  showMsg('已退出房间，可以重新建房或加入');
+  connect();
+}
+
+(function initBack() {
+  const btn = document.getElementById('backLobbyBtn');
+  if (btn) btn.addEventListener('click', (e) => { e.stopPropagation(); backToLobby(); });
+})();
