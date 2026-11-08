@@ -95,6 +95,7 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 .self-melds-box { background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.12); border-radius: 10px; padding: 4px 7px; margin-bottom: 4px; }
 .self-melds { display: flex; gap: 6px; flex-wrap: wrap; min-height: 4px; }
 .hand { display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; margin-bottom: 4px; }
+.hand .tile { flex: 0 0 auto; }   /* 不许被 flex 压窄：牌多就换行，不拉成细条 */
 .self-disc { display: flex; flex-wrap: wrap; gap: 2px; align-items: center; padding-top: 3px; border-top: 1px dashed rgba(255,255,255,.28); }
 .self-disc .disc-label { font-size: 10px; opacity: .65; margin-right: 4px; }
 
@@ -116,7 +117,7 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 .swap-choices .prow { border-bottom: 1px dashed rgba(255,255,255,.12); }
 .swap-choices .prow:last-child { border-bottom: 0; }
 
-.log { font-size: 11px; opacity: .7; padding: 2px 10px 8px; max-height: 56px; overflow-y: auto; }
+.log { font-size: 11px; opacity: .7; padding: 2px 146px 8px 10px; min-height: 46px; max-height: 56px; overflow-y: auto; }
 
 /* ---------- 竖屏提示 ---------- */
 #rotateHint { display: none; }
@@ -146,9 +147,9 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
   .tile.small { width: 18px; height: 24px; border-radius: 3px; }
   .tile.back { background: repeating-linear-gradient(45deg,#1565c0,#1565c0 3px,#0d47a1 3px,#0d47a1 6px); }
 
-  /* 自己手牌加大, 方便手指点; 窄屏横向滑动不换行 */
+  /* 自己手牌：竖屏牌多时折成两排，不横向滚动也不压扁 */
   .self { padding: 6px 4px; }
-  .hand { gap: 5px; flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+  .hand { gap: 5px; flex-wrap: wrap; overflow: visible; justify-content: center; padding-bottom: 3px; }
   .self-melds-box { padding: 3px 5px; margin-bottom: 6px; }
 
   /* 操作按钮加大 (拇指友好) */
@@ -170,8 +171,8 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
   .swap-dice-text b { font-size: 15px; }
   .result-main b { font-size: 32px; }
 
-  /* 日志在手机上压扁, 不占空间 */
-  .log { max-height: 38px; font-size: 10px; }
+  /* 日志在手机上压扁，右侧让给横排的三个圆按钮 */
+  .log { max-height: 54px; min-height: 50px; font-size: 10px; padding-right: 168px; }
 }
 
 /* 极窄屏(<360)继续微调 */
@@ -332,8 +333,8 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
    v11：快捷表情 / 音效开关 / 大牌特效
    ============================================================ */
 
-/* ---------- 右下角悬浮按钮（位置由 JS 贴着操作栏居中） ---------- */
-.social { position: fixed; right: 8px; display: flex; flex-direction: column; gap: 6px; z-index: 27; }  /* 高于表情遮罩(24)与面板(26)，打开面板时仍点得到 */
+/* ---------- 右下角悬浮按钮（横排，贴在屏幕底部，给手牌让出整片空间） ---------- */
+.social { position: fixed; right: 8px; bottom: 6px; display: flex; flex-direction: row; gap: 6px; z-index: 27; }  /* 高于表情遮罩(24)与面板(26)，打开面板时仍点得到 */
 .social-btn {
   width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba(255,255,255,.3);
   background: rgba(0,0,0,.42); color: #fff; font-size: 20px; line-height: 1;
@@ -345,6 +346,7 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 .social-btn.mute { font-size: 17px; opacity: .9; }
 .social-btn.voice { font-size: 13px; font-weight: 700; letter-spacing: 0; font-family: inherit; }
 .social-btn.off { opacity: .55; }
+.social-btn.bad { color: #ff7b7b; border-color: rgba(255,123,123,.55); }   /* 语音包没加载出来 */
 .social-btn.shake { animation: socialShake .3s ease; }
 @keyframes socialShake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-3px)} 75%{transform:translateX(3px)} }
 

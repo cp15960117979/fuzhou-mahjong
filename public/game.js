@@ -1043,13 +1043,26 @@ const Sound = (() => {
     try { c = ctx(); } catch (e) { voiceState = 'fail'; return; }
     if (!c || !c.decodeAudioData) { voiceState = 'fail'; return; }
     voiceState = 'loading';
+    const decode = (ab) => new Promise((ok, no) => {
+      const p = c.decodeAudioData(ab, ok, no);   // 老 Safari 只认回调式
+      if (p && p.then) p.then(ok, no);
+    }).then((b) => { voiceBuf = b; voiceState = 'ready'; })
+      .catch(() => { voiceState = 'fail'; });
+
+    // 单文件版把语音包内联成 data URI。微信/WKWebView 对 fetch(data:) 支持不稳
+    // （有的直接抛 TypeError），所以自己解 base64，不经过网络栈。
+    if (VOICE_URL.slice(0, 5) === 'data:') {
+      try {
+        const bin = atob(VOICE_URL.slice(VOICE_URL.indexOf(',') + 1));
+        const u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        decode(u8.buffer);
+      } catch (e) { voiceState = 'fail'; }
+      return;
+    }
     fetch(VOICE_URL)
       .then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
-      .then((ab) => new Promise((ok, no) => {
-        const p = c.decodeAudioData(ab, ok, no);   // 老 Safari 只认回调式
-        if (p && p.then) p.then(ok, no);
-      }))
-      .then((b) => { voiceBuf = b; voiceState = 'ready'; })
+      .then(decode)
       .catch(() => { voiceState = 'fail'; });
   }
 
@@ -1083,6 +1096,7 @@ const Sound = (() => {
     const prio = opt.prio || 1;
     if (opt.delay) { setTimeout(() => say(key, Object.assign({}, opt, { delay: 0 })), opt.delay); return; }
     if (voiceState === 'idle') loadVoice();
+    if (!ac || ac.state !== 'running') { try { ctx(); } catch (e) { return; } }
     if (voiceState !== 'ready' || muted) return;
     if (curVoice && curVoice.prio > prio) return;
     stopVoice();
@@ -1461,15 +1475,10 @@ function showEmojiBubble(seat, id) {
 
 /* ---------------- 面板 / 按钮 ---------------- */
 function placeSocial() {
-  const a = document.getElementById('actions');
+  // v12.1：三个按钮改成横排、固定在右下角（CSS 负责），不再跟着操作栏垂直居中 ——
+  //   竖排时 132px 高会往上顶到手牌区，把牌挡住
   const s = document.getElementById('social');
-  if (!a || !s) return;
-  const r = a.getBoundingClientRect();
-  if (!r.height) return;
-  const h = s.offsetHeight || 132;       // 三个按钮（表情 / 音效 / 语音）
-  const top = Math.round(r.top + r.height / 2 - h / 2);
-  const maxTop = window.innerHeight - h - 8;
-  s.style.top = Math.max(6, Math.min(top, maxTop)) + 'px';
+  if (s) s.style.top = '';
 }
 
 function toggleEmojiPanel(force) {
@@ -1483,7 +1492,10 @@ function toggleEmojiPanel(force) {
   btn.textContent = on ? '✕' : '😀';
   if (!on) return;
   const r = btn.getBoundingClientRect();
-  p.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+  // 按钮改成横排后，😀 在最左边；面板要对齐整组按钮的右边缘，否则会顶出屏幕左边
+  const group = document.getElementById('social');
+  const gr = group ? group.getBoundingClientRect() : r;
+  p.style.right = Math.max(8, Math.round(window.innerWidth - gr.right)) + 'px';
   const h = p.offsetHeight;
   if (r.top - 10 >= h) {           // 按钮上方放得下 → 住在上面
     p.style.bottom = Math.round(window.innerHeight - r.top + 6) + 'px';
@@ -1513,10 +1525,18 @@ function toggleEmojiPanel(force) {
   const voice = document.getElementById('voiceBtn');
   if (voice) {
     const syncV = () => {
+      const bad = Sound.voiceState === 'fail';
       voice.classList.toggle('off', !Sound.voiceOn);
-      voice.title = Sound.voiceOn ? '报牌语音已开（点一下关闭）' : '报牌语音已关（点一下打开）';
+      voice.classList.toggle('bad', bad);
+      voice.title = bad ? '语音包没加载出来（刷新页面试试）'
+        : Sound.voiceOn ? '报牌语音已开（点一下关闭）' : '报牌语音已关（点一下打开）';
     };
-    voice.addEventListener('click', (e) => { e.stopPropagation(); Sound.setVoiceOn(!Sound.voiceOn); syncV(); });
+    voice.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (Sound.voiceState === 'fail') { showMsg('语音包没加载出来，刷新一次页面试试', true); return; }
+      Sound.setVoiceOn(!Sound.voiceOn);
+      syncV();
+    });
     syncV();
   }
   const bd = document.getElementById('emojiBackdrop');
