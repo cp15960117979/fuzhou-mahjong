@@ -87,7 +87,8 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 .opp-disc .disc-tiles { display: flex; flex-wrap: wrap; gap: 2px; }
 .center { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; background: rgba(0,0,0,.18); border-radius: 12px; padding: 10px 14px; min-width: 120px; }
 .last-discard { min-height: 50px; display: flex; gap: 3px; justify-content: center; flex-wrap: wrap; max-width: 250px; }
-.turn-hint { margin-top: 6px; font-size: 12px; color: #ffcf3f; min-height: 16px; }
+.turn-hint { margin-top: 6px; font-size: 12px; color: #ffcf3f; min-height: 16px;
+  text-shadow: 0 1px 3px rgba(0,0,0,.55), 0 0 8px rgba(0,0,0,.35); }   /* 没有底框，靠文字阴影保证在绿桌面上看得清 */
 
 /* ---------- 牌（真实麻将牌面：筒=圆点 条=竹节 万=数字 花=单字） ---------- */
 .tile { position: relative; display: inline-flex; align-items: center; justify-content: center; background: linear-gradient(180deg,#ffffff,#f1f1e6); border: 1px solid #d8d8cc; border-radius: 5px; width: 30px; height: 40px; box-shadow: 0 1px 2px rgba(0,0,0,.45); overflow: hidden; }
@@ -190,6 +191,28 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 @media (max-width: 360px) {
   .tile { width: 23px; height: 32px; font-size: 11px; }
   .actions button { padding: 12px 16px; font-size: 16px; }
+}
+
+/* ---------- 竖屏专用：给对家的出牌行让位（横屏一律不动） ----------
+   对家的「牌盒 + 出牌」会随副露和弃牌越堆越高，左右两家按 40% 定位就会被压住。
+   --opp-shift 由 placeOpponents() 量出对家块底边后写入，这里只负责吃这个值。 */
+@media (orientation: portrait) and (max-width: 900px) {
+  .opp { max-width: 122px; }
+  .opp-left, .opp-right { top: calc(40% + var(--opp-shift, 0px)); }
+  /* 竖屏中间只留文字和刚打出的那张牌，不要深色底框（横屏维持原样） */
+  .center { width: 118px; min-width: 0; padding: 0; background: none; border-radius: 0; }
+  .last-discard { max-width: 118px; }
+  .turn-hint { font-size: 11px; line-height: 1.35; }
+}
+
+/* 竖屏且屏幕很矮（老安卓 640 高、SE 一代）：纵向根本放不下「对家块 + 左右两家」，
+   这两类机器上把对手牌缩小一档、对家放宽到一行 8 张，才腾得出位置 */
+@media (orientation: portrait) and (max-height: 700px) {
+  .tile.small { width: 16px; height: 22px; border-radius: 3px; }
+  .opp { max-width: 112px; }
+  .opp-top { max-width: 152px; }
+  .pinfo { font-size: 10px; gap: 3px; }
+  .opp-disc .disc-label, .disc-label { font-size: 9px; }
 }
 
 /* ---------- 顶栏模式 ---------- */
@@ -3710,13 +3733,13 @@ function render(){
   if(state.phase==='ended'){ scheduleResult(); }
   else { clearTimeout(resultTimer); setOverlay('resultModal', false); }
 
-  if(state.phase==='waiting'){ renderWaiting(); requestAnimationFrame(placeSocial); return; }
+  if(state.phase==='waiting'){ renderWaiting(); requestAnimationFrame(() => { placeOpponents(); placeSocial(); }); return; }
   if(state.phase==='swap'){ renderSwap(); }
 
   renderTable();
   renderActions();
   renderLog();
-  requestAnimationFrame(placeSocial);
+  requestAnimationFrame(() => { placeOpponents(); placeSocial(); });
 }
 function setOverlay(id, show){ const el=document.getElementById(id); if(show) el.classList.add('show'); else el.classList.remove('show'); }
 
@@ -5067,6 +5090,30 @@ function showEmojiBubble(seat, id) {
 }
 
 /* ---------------- 面板 / 按钮 ---------------- */
+/* 竖屏：对家的「牌盒 + 出牌行」会越堆越高，左右两家按 40% 固定定位就会被压住。
+   这里量出对家块的真实底边，把左右两家整体挪到它下面；横屏不写这个变量，布局完全不动。 */
+function placeOpponents() {
+  const t = document.querySelector('.table');
+  if (!t) return;
+  const portrait = window.innerWidth <= 900 && window.matchMedia('(orientation: portrait)').matches;
+  const topEl = t.querySelector('.opp-top');
+  const sideEl = t.querySelector('.opp-left');
+  const sideR = t.querySelector('.opp-right');
+  if (!portrait || !state || state.phase === 'waiting' || !topEl || !sideEl) {
+    t.style.removeProperty('--opp-shift');
+    return;
+  }
+  const tr = t.getBoundingClientRect();
+  // 左右两家高度常常不一样（副露多的那家更高），按高的那家算，否则矮的让开了、高的还压着
+  const h = Math.max(sideEl.offsetHeight || 0, (sideR && sideR.offsetHeight) || 0);
+  if (!tr.height || !h) return;
+  const baseTop = tr.top + tr.height * 0.4 - h / 2;   // 对应 CSS 里的 top:40%
+  const want = topEl.getBoundingClientRect().bottom + 8;   // 对家块底 + 8px 呼吸
+  const maxTop = tr.bottom - h - 6;                   // 再往下就压到自己的手牌了
+  const shift = Math.max(0, Math.round(Math.min(want, maxTop) - baseTop));
+  t.style.setProperty('--opp-shift', shift + 'px');
+}
+
 function placeSocial() {
   // v12.1：三个按钮改成横排、固定在右下角（CSS 负责），不再跟着操作栏垂直居中 ——
   //   竖排时 132px 高会往上顶到手牌区，把牌挡住
@@ -5140,8 +5187,8 @@ function toggleEmojiPanel(force) {
     if (p.contains(e.target) || (e.target.closest && e.target.closest('#emojiBtn'))) return;
     toggleEmojiPanel(false);
   });
-  window.addEventListener('resize', () => { placeSocial(); toggleEmojiPanel(false); });
-  window.addEventListener('orientationchange', () => setTimeout(placeSocial, 220));
+  window.addEventListener('resize', () => { placeOpponents(); placeSocial(); toggleEmojiPanel(false); });
+  window.addEventListener('orientationchange', () => setTimeout(() => { placeOpponents(); placeSocial(); }, 220));
   placeSocial();
 })();
 

@@ -76,7 +76,8 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 .opp-disc .disc-tiles { display: flex; flex-wrap: wrap; gap: 2px; }
 .center { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); text-align: center; background: rgba(0,0,0,.18); border-radius: 12px; padding: 10px 14px; min-width: 120px; }
 .last-discard { min-height: 50px; display: flex; gap: 3px; justify-content: center; flex-wrap: wrap; max-width: 250px; }
-.turn-hint { margin-top: 6px; font-size: 12px; color: #ffcf3f; min-height: 16px; }
+.turn-hint { margin-top: 6px; font-size: 12px; color: #ffcf3f; min-height: 16px;
+  text-shadow: 0 1px 3px rgba(0,0,0,.55), 0 0 8px rgba(0,0,0,.35); }   /* 没有底框，靠文字阴影保证在绿桌面上看得清 */
 
 /* ---------- 牌（真实麻将牌面：筒=圆点 条=竹节 万=数字 花=单字） ---------- */
 .tile { position: relative; display: inline-flex; align-items: center; justify-content: center; background: linear-gradient(180deg,#ffffff,#f1f1e6); border: 1px solid #d8d8cc; border-radius: 5px; width: 30px; height: 40px; box-shadow: 0 1px 2px rgba(0,0,0,.45); overflow: hidden; }
@@ -179,6 +180,28 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 @media (max-width: 360px) {
   .tile { width: 23px; height: 32px; font-size: 11px; }
   .actions button { padding: 12px 16px; font-size: 16px; }
+}
+
+/* ---------- 竖屏专用：给对家的出牌行让位（横屏一律不动） ----------
+   对家的「牌盒 + 出牌」会随副露和弃牌越堆越高，左右两家按 40% 定位就会被压住。
+   --opp-shift 由 placeOpponents() 量出对家块底边后写入，这里只负责吃这个值。 */
+@media (orientation: portrait) and (max-width: 900px) {
+  .opp { max-width: 122px; }
+  .opp-left, .opp-right { top: calc(40% + var(--opp-shift, 0px)); }
+  /* 竖屏中间只留文字和刚打出的那张牌，不要深色底框（横屏维持原样） */
+  .center { width: 118px; min-width: 0; padding: 0; background: none; border-radius: 0; }
+  .last-discard { max-width: 118px; }
+  .turn-hint { font-size: 11px; line-height: 1.35; }
+}
+
+/* 竖屏且屏幕很矮（老安卓 640 高、SE 一代）：纵向根本放不下「对家块 + 左右两家」，
+   这两类机器上把对手牌缩小一档、对家放宽到一行 8 张，才腾得出位置 */
+@media (orientation: portrait) and (max-height: 700px) {
+  .tile.small { width: 16px; height: 22px; border-radius: 3px; }
+  .opp { max-width: 112px; }
+  .opp-top { max-width: 152px; }
+  .pinfo { font-size: 10px; gap: 3px; }
+  .opp-disc .disc-label, .disc-label { font-size: 9px; }
 }
 
 /* ---------- 顶栏模式 ---------- */

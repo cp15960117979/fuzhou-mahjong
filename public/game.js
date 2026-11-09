@@ -117,13 +117,13 @@ function render(){
   if(state.phase==='ended'){ scheduleResult(); }
   else { clearTimeout(resultTimer); setOverlay('resultModal', false); }
 
-  if(state.phase==='waiting'){ renderWaiting(); requestAnimationFrame(placeSocial); return; }
+  if(state.phase==='waiting'){ renderWaiting(); requestAnimationFrame(() => { placeOpponents(); placeSocial(); }); return; }
   if(state.phase==='swap'){ renderSwap(); }
 
   renderTable();
   renderActions();
   renderLog();
-  requestAnimationFrame(placeSocial);
+  requestAnimationFrame(() => { placeOpponents(); placeSocial(); });
 }
 function setOverlay(id, show){ const el=document.getElementById(id); if(show) el.classList.add('show'); else el.classList.remove('show'); }
 
@@ -1474,6 +1474,30 @@ function showEmojiBubble(seat, id) {
 }
 
 /* ---------------- 面板 / 按钮 ---------------- */
+/* 竖屏：对家的「牌盒 + 出牌行」会越堆越高，左右两家按 40% 固定定位就会被压住。
+   这里量出对家块的真实底边，把左右两家整体挪到它下面；横屏不写这个变量，布局完全不动。 */
+function placeOpponents() {
+  const t = document.querySelector('.table');
+  if (!t) return;
+  const portrait = window.innerWidth <= 900 && window.matchMedia('(orientation: portrait)').matches;
+  const topEl = t.querySelector('.opp-top');
+  const sideEl = t.querySelector('.opp-left');
+  const sideR = t.querySelector('.opp-right');
+  if (!portrait || !state || state.phase === 'waiting' || !topEl || !sideEl) {
+    t.style.removeProperty('--opp-shift');
+    return;
+  }
+  const tr = t.getBoundingClientRect();
+  // 左右两家高度常常不一样（副露多的那家更高），按高的那家算，否则矮的让开了、高的还压着
+  const h = Math.max(sideEl.offsetHeight || 0, (sideR && sideR.offsetHeight) || 0);
+  if (!tr.height || !h) return;
+  const baseTop = tr.top + tr.height * 0.4 - h / 2;   // 对应 CSS 里的 top:40%
+  const want = topEl.getBoundingClientRect().bottom + 8;   // 对家块底 + 8px 呼吸
+  const maxTop = tr.bottom - h - 6;                   // 再往下就压到自己的手牌了
+  const shift = Math.max(0, Math.round(Math.min(want, maxTop) - baseTop));
+  t.style.setProperty('--opp-shift', shift + 'px');
+}
+
 function placeSocial() {
   // v12.1：三个按钮改成横排、固定在右下角（CSS 负责），不再跟着操作栏垂直居中 ——
   //   竖排时 132px 高会往上顶到手牌区，把牌挡住
@@ -1547,8 +1571,8 @@ function toggleEmojiPanel(force) {
     if (p.contains(e.target) || (e.target.closest && e.target.closest('#emojiBtn'))) return;
     toggleEmojiPanel(false);
   });
-  window.addEventListener('resize', () => { placeSocial(); toggleEmojiPanel(false); });
-  window.addEventListener('orientationchange', () => setTimeout(placeSocial, 220));
+  window.addEventListener('resize', () => { placeOpponents(); placeSocial(); toggleEmojiPanel(false); });
+  window.addEventListener('orientationchange', () => setTimeout(() => { placeOpponents(); placeSocial(); }, 220));
   placeSocial();
 })();
 
