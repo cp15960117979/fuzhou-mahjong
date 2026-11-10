@@ -25,29 +25,136 @@ let swapSuit = null;    // 换牌阶段：本地选定的花色（点击花色�
 let curSwapId = -1;     // 当前换牌轮次 id（服务端递增），变化即重置本地选择
 let swapSubmitted = false; // 本地已点过"确认"（等待服务端回执）
 let swapSubmitAt = 0;   // 点确认的时间，用于超时重试
+let armedEl = null;     // v14 出牌二次确认：第一次点中的那张牌（再点一次才打出）
+let armedAt = 0;        // 抬牌时间：太快的连点当作误触，不打出
+
+// v13：单文件版没有服务端，账号/重连/代打这些联网功能要藏起来
+const STANDALONE = location.protocol === 'file:' || !!window.__SINGLE;
+
+// 本地存储：本次房间的重连令牌（网络断开时自动认回原座位）
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) { /* 隐私模式 */ } },
+};
+let session = (() => { try { return JSON.parse(LS.get('fz_session', 'null')); } catch (e) { return null; } })();
+if (STANDALONE) session = null;
+let retries = 0, reconnectTimer = 0, hbTimer = 0, pongTimer = 0;
 
 // 连接未就绪时先入队，避免"点创建房间没反应"
 const outbox = [];
-function connect() {
-  ws = new WebSocket(WS_URL);
-  ws.onopen = () => { while (outbox.length) { try { ws.send(JSON.stringify(outbox.shift())); } catch { break; } } };
-  ws.onmessage = (ev) => { handle(JSON.parse(ev.data)); };
-  ws.onclose = () => { showMsg('与服务器断开，请刷新页面', true); };
+function flushOutbox() {
+  while (outbox.length) { try { ws.send(JSON.stringify(outbox.shift())); } catch (e) { break; } }
 }
+
+function connect() {
+  try { ws = new WebSocket(WS_URL); } catch (e) { scheduleReconnect(); return; }
+  ws.onopen = () => {
+    // 有房间会话就先认回原座位，成功后再补发离线期间点的操作
+    if (session && session.room && session.rtoken) {
+      ws.send(JSON.stringify({ t: 'rejoin', room: session.room, rtoken: session.rtoken }));
+    } else {
+      flushOutbox();
+    }
+    startHeartbeat();
+  };
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+    handle(m);
+  };
+  ws.onclose = () => {
+    stopHeartbeat();
+    if (!session) { if (state) showMsg('与服务器断开，请刷新页面', true); return; }
+    scheduleReconnect();
+  };
+}
+
+// 断线重连：0.4s 起指数退避，最长 8s 一次，最多 10 轮
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  showNet('连接已断开，正在重连…');
+  if (retries >= 10) { showNet('重连失败，请刷新页面'); return; }
+  const delay = Math.min(8000, Math.round(400 * Math.pow(1.7, retries)));
+  retries += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = 0;
+    try { connect(); } catch (e) { scheduleReconnect(); }
+  }, delay);
+}
+
+// 心跳：手机切后台后 WebSocket 可能是"假连接"，靠 ping/pong 把它戳破
+function startHeartbeat() {
+  stopHeartbeat();
+  hbTimer = setInterval(() => {
+    if (!ws || ws.readyState !== 1) return;
+    try { ws.send(JSON.stringify({ t: 'ping' })); } catch (e) { return; }
+    clearTimeout(pongTimer);
+    pongTimer = setTimeout(() => { try { ws.close(); } catch (e) { /* ignore */ } }, 12000);
+  }, 25000);
+}
+function stopHeartbeat() { clearInterval(hbTimer); clearTimeout(pongTimer); hbTimer = 0; }
+
+function showNet(text) {
+  const bar = document.getElementById('netBar');
+  const t = document.getElementById('netText');
+  if (!bar || STANDALONE) return;
+  if (t) t.textContent = text;
+  bar.hidden = false;
+  document.body.classList.add('net-warn');
+}
+function hideNet() {
+  const bar = document.getElementById('netBar');
+  if (bar) bar.hidden = true;
+  document.body.classList.remove('net-warn');
+}
+
 function send(obj){
   if (ws && ws.readyState === 1) { ws.send(JSON.stringify(obj)); return; }
   outbox.push(obj);
   if (outbox.length === 1) showMsg('正在连接服务器…');
 }
 
+function saveSession(room, rtoken) {
+  if (STANDALONE) return;          // 单机版没有服务端可重连
+  session = { room, rtoken };
+  LS.set('fz_session', JSON.stringify(session));
+}
+function clearSession() { session = null; LS.set('fz_session', null); }
+
 function handle(msg){
   switch(msg.t){
-    case 'created': mySeat = msg.seat; showGame(); break;
-    case 'joined': mySeat = msg.seat; showGame(); break;
+    case 'created':
+    case 'joined':
+      mySeat = msg.seat;
+      if (msg.rtoken) saveSession(msg.room, msg.rtoken);
+      retries = 0; hideNet();
+      showGame();
+      break;
+    case 'rejoined':
+      // 断线/刷新后认回原座位：座位号可能因为等待阶段重排变了，以服务端为准
+      mySeat = msg.seat;
+      if (msg.rtoken) saveSession(msg.room, msg.rtoken);
+      retries = 0; hideNet(); flushOutbox();
+      showGame();
+      break;
+    case 'rejoinFail':
+      clearSession(); hideNet();
+      showMsg(msg.msg || '座位已失效，请重新加入房间', true);
+      if (state) backToLobby();
+      break;
+    case 'pong': clearTimeout(pongTimer); break;
     case 'state': {
       state = msg.state;
+      hideNet();
       // 等待阶段有人退出后座位会重排，以服务端下发的 selfSeat 为准
       if (state && state.selfSeat != null) mySeat = state.selfSeat;
+      // 没填昵称的人会被服务端叫「玩家N」：把真实名字记下来，
+      // 刷新页面后昵称栏自动带出来，才能用「同一昵称 + 房间码」重连。
+      const meNow = state && state.players ? state.players.find((p) => p.seat === state.selfSeat) : null;
+      if (meNow && meNow.name) {
+        const el = document.getElementById('nameInput');
+        if (el) el.value = meNow.name;
+        LS.set('fz_name', meNow.name);
+      }
       // v11：事件流随 state 一起到——音效/特效按真实动作播，不靠 diff 猜
       if (msg.events && msg.events.length) msg.events.forEach(onGameEvent);
       render();
@@ -68,7 +175,11 @@ function showGame(){
 function showMsg(text, isErr){ const el=document.getElementById('lobbyMsg'); el.textContent=text; el.style.color=isErr?'#ffb3b3':'#dfffdf'; }
 
 function nameOf(seat){ const p = state && state.players.find(x=>x.seat===seat); return p ? p.name : ('座位'+seat); }
-function isHost(){ return state && state.selfSeat === 0; }
+function isHost(){
+  if (!state) return false;
+  const me = state.players.find(p => p.seat === state.selfSeat);
+  return !!(me && me.isHost);
+}
 // 片数显示：整数不带小数，四分之一片保留两位
 function fmtPts(n){
   const v = Math.round((n||0)*100)/100;
@@ -117,6 +228,16 @@ function render(){
   if(state.phase==='ended'){ scheduleResult(); }
   else { clearTimeout(resultTimer); setOverlay('resultModal', false); }
 
+  // 代打按钮：只在牌局里出现，开着的时候高亮
+  const autoBtn = document.getElementById('autoBtn');
+  if (autoBtn) {
+    const meP = state.players.find(p => p.seat === state.selfSeat);
+    const on = !!(meP && meP.auto);
+    autoBtn.hidden = state.phase === 'waiting';   // 没开局没什么可代的（单机版也能代打）
+    autoBtn.classList.toggle('on', on);
+    autoBtn.title = on ? '取消代打，自己打' : '交给机器人代打';
+  }
+
   if(state.phase==='waiting'){ renderWaiting(); requestAnimationFrame(() => { placeOpponents(); placeSocial(); }); return; }
   if(state.phase==='swap'){ renderSwap(); }
 
@@ -133,7 +254,10 @@ function renderWaiting(){
   const list = document.getElementById('playerList'); list.innerHTML='';
   state.players.forEach(p=>{
     const d=document.createElement('div'); d.className='pl-item';
-    d.textContent = `${p.name}${p.isHost?'(房主)':''}${p.isBot?'(机器人)':''}${p.connected?'':' (离线)'}`;
+    const tag = p.isBot ? '(机器人)'
+      : p.autoReason === 'offline' ? ' (离线·代打中)'
+      : p.auto ? ' (代打中)' : '';
+    d.textContent = `${p.name}${p.isHost?'(房主)':''}${tag}`;
     if(p.isBot) d.style.opacity='.75';
     list.appendChild(d);
   });
@@ -464,23 +588,83 @@ function tileEl(idx, {small = false, back = false, joker = false} = {}) {
 }
 
 // 副露渲染：金坎在"金位"留空框（如 七筒 [金] 九筒）
-function meldEl(m, small){
+// v14：暗杠对别人是 4 张背面，对自己是 3 背 + 1 亮；点一下副露可以看这张牌是谁喂的。
+function meldEl(m, small, ownerSeat){
   const hold=document.createElement('div'); hold.className='meld-group';
   const wrap=document.createElement('div');
   wrap.className='melds' + (m.type==='jinkan' ? ' jinkan-meld' : '');
   hold.appendChild(wrap);
-  (m.tiles||[]).forEach(t=>{
-    if(t==='J'){
-      const g=document.createElement('div');
-      g.className='tile'+(small?' small':'')+' jin-gap';
-      g.title='金位（等摸金补位）';
-      g.textContent='金';
-      wrap.appendChild(g);
-    } else {
-      wrap.appendChild(tileEl(t,{small:!!small,joker:t===state.joker}));
-    }
-  });
+  // 杠出来的那一组加个金色描边 + 「杠」角标：别人的暗杠是 4 张背面，
+  //   和手牌背面长得一样，不标一下根本看不出这手已经杠过
+  if (m.type === 'angang' || m.type === 'gang' || m.type === 'bugang') hold.classList.add('meld-gang');
+  if (m.hidden) {
+    // 别人的暗杠：一张都不给看
+    for (let i=0;i<(m.hidden||4);i++) wrap.appendChild(tileEl(0,{small:!!small,back:true}));
+    hold.title='暗杠';
+  } else if (m.selfConcealed) {
+    // 自己的暗杠：盖 3 张、亮 1 张（自己知道杠的是什么）
+    for (let i=0;i<3;i++) wrap.appendChild(tileEl(0,{small:!!small,back:true}));
+    if ((m.tiles||[]).length) wrap.appendChild(tileEl(m.tiles[0],{small:!!small,joker:m.tiles[0]===state.joker}));
+    hold.title='暗杠（自己看一张）';
+  } else {
+    (m.tiles||[]).forEach(t=>{
+      if(t==='J'){
+        const g=document.createElement('div');
+        g.className='tile'+(small?' small':'')+' jin-gap';
+        g.title='金位（等摸金补位）';
+        g.textContent='金';
+        wrap.appendChild(g);
+      } else {
+        wrap.appendChild(tileEl(t,{small:!!small,joker:t===state.joker}));
+      }
+    });
+  }
+  // 有来源的副露（吃/碰/杠）可点：右下角显示是谁喂的
+  if (ownerSeat != null && m.from != null && m.from >= 0) {
+    hold.classList.add('meld-clickable');
+    hold.onclick = (e) => { e.stopPropagation(); toggleMeldTip(m, ownerSeat, hold); };
+  }
   return hold;
+}
+
+let meldTipKey = '', meldTipTimer = 0;
+function toggleMeldTip(m, ownerSeat, el) {
+  const box = document.getElementById('meldTip');
+  if (!box) return;
+  const key = ownerSeat + ':' + m.type + ':' + (m.claim == null ? '?' : m.claim) + ':' + m.from;
+  if (meldTipKey === key && !box.hidden) {
+    box.hidden = true; meldTipKey = ''; el.classList.remove('active');
+    return;
+  }
+  document.querySelectorAll('.meld-clickable.active').forEach((x) => x.classList.remove('active'));
+  el.classList.add('active');
+  const verb = { chi:'吃', peng:'碰', gang:'杠', bugang:'加杠', angang:'暗杠', jinkan:'金坎' }[m.type] || '吃碰';
+  const t = m.claim != null ? m.claim : (m.tiles||[]).find((x) => typeof x === 'number');
+  const tileTxt = (t == null) ? '' : (TILE_NAMES[t] || '');
+  const owner = ownerSeat === state.selfSeat ? '你' : nameOf(ownerSeat);
+  if (m.from == null || m.from < 0) { box.textContent = `${owner} ${verb} ${tileTxt}`.trim(); }
+  else {
+    const d = (m.from - state.selfSeat + 4) % 4;
+    const rel = d === 0 ? '你' : d === 1 ? '下家' : d === 2 ? '对家' : '上家';
+    box.textContent = `${owner} ${verb} ${tileTxt} · 这张是${rel}（${nameOf(m.from)}）打的`;
+  }
+  box.hidden = false;
+  meldTipKey = key;
+  // 位置：默认在右下角表情按钮上方；如果操作栏里正摆着「胡/碰/吃」，就抬到操作栏之上，别把按钮盖住
+  let bottom = 56;
+  const actBox = document.getElementById('actions');
+  if (actBox) {
+    const r = actBox.getBoundingClientRect();
+    if (r.height > 0 && r.top > 0 && r.top < window.innerHeight) {
+      bottom = Math.max(bottom, Math.round(window.innerHeight - r.top) + 6);
+    }
+  }
+  box.style.bottom = Math.min(bottom, Math.round(window.innerHeight * 0.45)) + 'px';
+  clearTimeout(meldTipTimer);
+  meldTipTimer = setTimeout(() => {
+    box.hidden = true; meldTipKey = '';
+    document.querySelectorAll('.meld-clickable.active').forEach((x) => x.classList.remove('active'));
+  }, 6000);
 }
 
 function renderTable(){
@@ -497,16 +681,19 @@ function renderTable(){
     const flags = [];
     if(p.jinKan) flags.push('<span class="jinkan-flag">金坎</span>');
     if(p.declaredTing) flags.push('<span class="ting-flag">听</span>');
+    const autoTag = p.auto
+      ? `<span class="auto-flag${p.autoReason === 'offline' ? ' offline' : ''}">${p.autoReason === 'offline' ? '离线代打' : '代打'}</span>`
+      : '';
     const badges = (isDealer ? '<span class="dealer">庄</span>' : '') +
       (p.flowerCount ? `<span class="flower">花${p.flowerCount}</span>` : '') +
-      scoreChip(p.score);
+      scoreChip(p.score) + autoTag;
     pinfo.innerHTML = `<span class="${p.isCurrent?'cur':''} ${p.connected?'':'off'}">${p.name}${p.isHost?'(房)':''}${p.isCurrent?' ◀':''}</span> ${badges} ${flags.join('')} <span style="opacity:.7">${p.handCount}张</span>`;
     // 吃碰区（阴影盒内）：暗牌(手牌背面) + 已亮明子
     const backWrap=document.createElement('div'); backWrap.className='melds';
     for(let i=0;i<p.handCount;i++) backWrap.appendChild(tileEl(0,{small:true,back:true}));
     const meldsWrap=el.querySelector('.melds'); meldsWrap.innerHTML='';
     // 副露排在暗牌前面：盒子被裁切时也不会把亮出的牌吃掉
-    p.melds.forEach(m=>{ meldsWrap.appendChild(meldEl(m,true)); });
+    p.melds.forEach(m=>{ meldsWrap.appendChild(meldEl(m,true,p.seat)); });
     meldsWrap.appendChild(backWrap);
     // 打出的牌：移到阴影区外
     const discBox=el.querySelector('.opp-disc'); discBox.innerHTML='';
@@ -552,6 +739,7 @@ function renderTable(){
   }
 
   const handEl=document.getElementById('hand'); handEl.innerHTML='';
+  armedEl = null;   // 手牌重建，上一次"点起来等确认"的牌作废
   if(self.jinKan){
     // 金坎：手牌全部盖倒（连自己都不看牌），只等摸金
     const n = self.hand ? self.hand.length : (self.handCount || 0);
@@ -565,10 +753,29 @@ function renderTable(){
     if(drawn != null){ const i = rest.lastIndexOf(drawn); if(i >= 0) rest.splice(i,1); }
     const ordered = sortHand(rest, state.joker);
     if(drawn != null) ordered.push(drawn);
+    // 代打中手牌不可点：不然会和机器人抢同一手牌（操作栏也会提示去点「代」收回）
+    const canDiscard = state.actions.includes('discard') && !self.auto;
+    const tingPick = new Set((self.tingDiscards||[]));
     ordered.forEach((t,i)=>{
       const te=tileEl(t,{joker:t===state.joker});
       if(drawn != null && i===ordered.length-1) te.classList.add('just-drawn');
-      if(state.actions.includes('discard')) te.onclick=()=>send({t:'discard',tile:t});
+      // 报听后：打这张就能听牌 → 上移提示（仍要两次点击才真正打出）
+      if(canDiscard && tingPick.has(t)) te.classList.add('ting-pick');
+      if(canDiscard){
+        // v14：两次确认。第一次点只把牌抬起来，再点同一张才打出去，防手滑。
+        te.onclick=()=>{
+          if(armedEl === te){
+            if(Date.now() - armedAt < 180) return;   // 误触连点：先不打出
+            armedEl = null;
+            send({t:'discard',tile:t});
+            return;
+          }
+          if(armedEl) armedEl.classList.remove('armed');
+          armedEl = te;
+          armedAt = Date.now();
+          te.classList.add('armed');
+        };
+      }
       handEl.appendChild(te);
     });
     // 手机上牌多会横滑：摸牌后自动滚到最右，保证刚摸的那张看得见
@@ -578,11 +785,12 @@ function renderTable(){
   }
   const sm=document.getElementById('selfMelds'); sm.innerHTML='';
   // 金坎组用正常尺寸，亮在台面上让人一眼看到
-  self.melds.forEach(m=>{ const g=meldEl(m, m.type!=='jinkan'); g.style.marginRight='8px'; sm.appendChild(g); });
+  self.melds.forEach(m=>{ const g=meldEl(m, m.type!=='jinkan', self.seat); g.style.marginRight='8px'; sm.appendChild(g); });
   const si=document.getElementById('selfInfo');
   if(si){
     const isDealer = self.seat === state.dealer;
     si.innerHTML = `<span class="${self.isCurrent?'cur':''}">${self.name}</span>` +
+      (self.auto?`<span class="auto-flag${self.autoReason==='offline'?' offline':''}">${self.autoReason==='offline'?'离线代打':'代打中'}</span>`:'') +
       (isDealer?'<span class="dealer">庄</span>':'') +
       (self.flowerCount?`<span class="flower">花${self.flowerCount}</span>`:'') +
       (self.jinKan?'<span class="jinkan-flag">金坎</span>':'') +
@@ -604,8 +812,18 @@ function renderActions(){
   const acts=state.actions||[];
   const self = state.players.find(p=>p.seat===state.selfSeat);
 
+  // 代打中：操作交给机器人，牌桌不再摆按钮（否则会和机器人抢同一手牌）
+  if(self && self.auto){
+    const tip=document.createElement('span'); tip.className='act-tip act-auto';
+    tip.textContent = self.autoReason==='offline'
+      ? '你已掉线 · 机器人代打中，重连后自动交还'
+      : '机器人代打中 · 再点右下角「代」可以收回';
+    box.appendChild(tip);
+    return;
+  }
+
   if(acts.includes('discard') && self && self.isCurrent){
-    const tip=document.createElement('span'); tip.textContent='点击手牌打出'; tip.style.alignSelf='center'; tip.style.opacity='.8'; box.appendChild(tip);
+    const tip=document.createElement('span'); tip.textContent='点一下牌会抬起来，再点同一张才打出'; tip.style.alignSelf='center'; tip.style.opacity='.8'; box.appendChild(tip);
   }
   // 碰/杠优先：自己已经申请吃，正在等碰家表态
   if(state.pending && state.pending.chiWait === state.selfSeat){
@@ -696,15 +914,37 @@ function renderActions(){
     tip.textContent='这手是小胡（普通牌型），只能自摸，别人打的牌不能点炮';
     box.appendChild(tip);
   }
+  // 清/混一色满 3 手没报听：牌能胡，但这张不能胡
+  if(state.pending && (state.pending.needTing||[]).includes(state.selfSeat)){
+    const tip=document.createElement('span'); tip.className='act-tip act-warn';
+    tip.textContent='这手是清/混一色，吃碰已满 3 手 —— 没报听，这张不能胡。下回合先点「宣告听牌」';
+    box.appendChild(tip);
+  }
+  if(self && self.needTing){
+    const tip=document.createElement('span'); tip.className='act-tip act-warn';
+    tip.textContent='这手已经能胡，但清/混一色吃碰满 3 手，必须先点「宣告听牌」才能胡（杠上开花除外）';
+    box.appendChild(tip);
+  }
+  // 报听后：提示打哪几张能听牌
+  const tingPicks=(self && self.tingDiscards)||[];
+  if(tingPicks.length && state.actions.includes('discard')){
+    const tip=document.createElement('span'); tip.className='act-tip act-hu-tip';
+    tip.textContent=`已报听：打上移高亮的 ${tingPicks.map(t=>TILE_NAMES[t]||'').join(' / ')} 都能听牌`;
+    box.appendChild(tip);
+  }
   // 已听金雀：提醒别手快——碰/吃会把这手金雀拆掉
   const jqTiles = (self && self.jinQueTiles) || [];
   if(jqTiles.length){
     const canP = acts.includes('peng') || acts.includes('gang') || acts.some(a=>a&&a.act==='chi');
     const names = jqTiles.map(t=>TILE_NAMES[t]||'').join(' / ');
     const tip=document.createElement('span'); tip.className='act-tip act-warn';
-    tip.textContent = canP
-      ? `⚠ 你已听金雀（摸到 ${names} 就胡），碰/吃会拆掉这手金雀`
-      : `你已听金雀：摸到 ${names} 就胡`;
+    if(state.pending && !acts.includes('hu')){
+      tip.textContent = `你听的是金雀（摸到 ${names} 就胡）：纯金雀只能自摸/抢金，别人打的这张不能胡`;
+    } else {
+      tip.textContent = canP
+        ? `⚠ 你已听金雀（摸到 ${names} 就胡），碰/吃会拆掉这手金雀`
+        : `你已听金雀：摸到 ${names} 就胡`;
+    }
     box.appendChild(tip);
   }
   const chiAct = acts.find(a=>a && a.act==='chi');
@@ -789,7 +1029,7 @@ function buildSettle(w){
     const cards=document.createElement('span'); cards.className='scards';
     if(p.melds && p.melds.length){
       const mw=document.createElement('span'); mw.className='smelds';
-      p.melds.forEach(m=>mw.appendChild(meldEl(m,true)));
+      p.melds.forEach(m=>mw.appendChild(meldEl(m,true,seat)));
       cards.appendChild(mw);
     }
     const hw=document.createElement('span'); hw.className='shand';
@@ -898,15 +1138,26 @@ function renderLog(){
 }
 
 // ---------- 大厅事件 ----------
-document.getElementById('createBtn').onclick=()=>{
-  const name=document.getElementById('nameInput').value.trim()||'玩家';
-  send({t:'create',name});
-};
+// 昵称就是这一桌的身份：留空 = 服务端按进房顺序叫「玩家1/2/3/4」；
+// 掉线后用同一个昵称 + 房间码重进，会直接回到原座位。
+function myNameInput(){ return document.getElementById('nameInput').value.trim().slice(0, 10); }
+function enterRoom(t, extra){
+  const name = myNameInput();
+  LS.set('fz_name', name);
+  send(Object.assign({ t, name }, extra || {}));
+}
+(function initName() {
+  const el = document.getElementById('nameInput');
+  if (!el) return;
+  const n = LS.get('fz_name', '');
+  if (n && !el.value) el.value = n;
+})();
+
+document.getElementById('createBtn').onclick=()=>{ enterRoom('create'); };
 document.getElementById('joinBtn').onclick=()=>{
   const room=document.getElementById('roomInput').value.trim().toUpperCase();
-  const name=document.getElementById('nameInput').value.trim()||'玩家';
   if(room.length<2){ showMsg('请输入房间码',true); return; }
-  send({t:'join',room,name});
+  enterRoom('join', { room });
 };
 
 document.getElementById('startBtn').onclick=()=>{
@@ -917,6 +1168,21 @@ document.getElementById('addBotBtn').onclick=()=>send({t:'addBot'});
 document.getElementById('removeBotBtn').onclick=()=>send({t:'removeBot'});
 
 connect();
+
+/* ============================================================
+   v13：代打（v14 起不再需要账号，座位只认昵称）
+   ============================================================ */
+(function initAuto() {
+  const b = document.getElementById('autoBtn');
+  if (!b) return;
+  b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!state || state.phase === 'waiting') return;   // 没开局没什么可代的
+    const me = state.players.find(p => p.seat === state.selfSeat);
+    if (!me || me.isBot) return;
+    send({ t: 'auto', on: !me.auto });
+  });
+})();
 
 /* ============================================================
    v11：音效 · 大牌特效 · 快捷表情
@@ -1716,19 +1982,19 @@ const RULE_SECTIONS = [
   {
     t: '包牌：喂牌要负责',
     h: `
-      <p>有人做<b>清一色 / 混一色</b>，他每一手吃碰杠都是别人在帮他凑牌型。喂得越多，他做成的概率越大，所以<b>喂牌的人不能和旁观者出一样多</b>。只对清 / 混一色生效，对对胡、金雀等不包。</p>
-      <p><b>先看最后一手是谁喂的</b>：都已经吃了三手同花色，还往这个颜色上打，他再吃下去就报听了 —— 这一张的责任最明确，<b>哪怕他总共只喂了这一手，也担一半</b>。</p>
-      <p><b>再看是不是同一个人一路喂到底</b>：从头到尾都是他喂的（喂满 4 手以上），这个牌型就是他一手喂成的 → <b>全包</b>。</p>
+      <p>有人做<b>清一色 / 混一色</b>，吃到第 4 手时，牌型基本已经被喂实了。只对清 / 混一色生效，对对胡、金雀等不包。</p>
+      <p><b>3 手及以下不算包</b>：吃 2 手 + 碰 1 手就是 3 手，这是清混的常态，三家各付一份。</p>
+      <p><b>4 手起看最后一手是谁喂的</b>：这一张的责任最明确，<b>他担一半</b>；如果 4 手全是一个人喂的，就是他一手喂成 → <b>全包</b>。</p>
       <p><b>点炮时，「最后一手」由放炮者扮演</b>：最后那张是他打的，责任归他。</p>
       <div class="rule-scroll"><table>
         <tr><th>情况</th><th>怎么分（总额 = 3 份）</th></tr>
-        <tr><td>3 手 · 自摸</td><td>喂最后一手的人一半，另两家各 1/4</td></tr>
-        <tr><td>3 手 · 点炮</td><td>放炮者一半，另两家各 1/4</td></tr>
-        <tr><td>4 手以上全同一人 · 自摸</td><td>这个人<b>全包</b>，其余两家 0</td></tr>
-        <tr><td>4 手以上全同一人 · 别人点炮</td><td>放炮者一半，喂牌的人一半</td></tr>
-        <tr><td>4 手以上不同人 · 点炮</td><td>放炮者<b>全包</b>（没人能算「一手喂成」）</td></tr>
+        <tr><td>3 手及以下</td><td>三家各付 1 份（不包）</td></tr>
+        <tr><td>4 手同一人 · 自摸</td><td>这个人<b>全包</b>，其余两家 0</td></tr>
+        <tr><td>4 手不同人 · 自摸</td><td>喂第 4 手的人一半，另两家各 1/4</td></tr>
+        <tr><td>4 手同一人 · 别人点炮</td><td>放炮者一半，喂牌的人一半</td></tr>
+        <tr><td>4 手不同人 · 点炮</td><td>放炮者<b>全包</b>（没人能算「一手喂成」）</td></tr>
       </table></div>
-      <p class="mini">例：B 把 A 喂成清一色，C 放炮 50 片/家（总额 150）。3 手时 C 付 75、B 付 37.5、第四家 37.5；如果这 4 手全是 B 喂的，则 C 付 75、B 付 75、第四家 0。</p>
+      <p class="mini">例：B 把 A 喂成清一色，C 放炮 50 片/家（总额 150）。吃到 3 手时三家各付 50；吃到第 4 手、且 4 手全是 B 喂的，则 C 付 75、B 付 75、第四家 0。</p>
     `
   },
   {
@@ -1749,7 +2015,7 @@ const RULE_SECTIONS = [
     h: `
       <ul>
         <li><b>打金是安全的</b>：金打出去别人不能吃、碰、点炮。抢金抢的是公示金，跟这张弃牌无关。</li>
-        <li><b>报听目前只是标记</b>：不影响算钱，也没有「报听不能改牌」之类的限制。</li>
+        <li><b>报听是硬门槛</b>：清/混一色 + 吃碰满 3 手，不点「宣告听牌」不能胡（杠上开花例外）。报听后打哪几张能听牌，牌面会自己上移。</li>
         <li><b>一炮多响只算一家</b>：从放炮者下家开始按顺序，先轮到的胡，不是一起胡。</li>
         <li><b>金坎一旦宣告，全场只能自摸</b>，谁都不能点炮，也不能再杠。</li>
         <li><b>流局（臭庄）庄家连庄 +1</b>；换牌无效重摇不算一局，不涨连庄。</li>
@@ -1826,6 +2092,7 @@ function backToLobby() {
 function finishLeave() {
   if (!leavingRoom && !state) return;   // 已经回过首页
   leavingRoom = false;
+  clearSession();                        // 主动退出后不再自动重连回这个房间
   if (ws) {
     try { ws.onclose = null; ws.onmessage = null; ws.close(); } catch (e) { /* ignore */ }
     ws = null;

@@ -449,7 +449,8 @@ function conn(t, counts) {
 // ---------- 主入口 ----------
 function botDecide(room, seat) {
   const p = room.getPlayer(seat);
-  if (!p || !p.isBot) return;
+  // v13：真人开了「代打」或掉线时，同一套决策接管他的席位
+  if (!p || !(p.isBot || p.autoManual || !p.connected)) return;
   if (room.phase !== 'playing' && room.phase !== 'swap') return;
   const st = room.getState(seat);
   const acts = st.actions || [];

@@ -90,6 +90,19 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 .tile.sel { outline: 3px solid #ffcf3f; }
 /* 刚摸上来的那张：和手牌拉开距离 + 绿框上浮，一眼认出；打出别的牌后自动归位 */
 .tile.just-drawn { margin-left: 12px; transform: translateY(-5px); box-shadow: 0 0 0 2px #4cd07d, 0 3px 7px rgba(0,0,0,.5); }
+/* v14 出牌二次确认：第一次点击只把牌抬起来，再点同一张才打出去 */
+.hand .tile { cursor: pointer; }
+.tile.armed {
+  transform: translateY(-16px) !important;
+  box-shadow: 0 0 0 3px #ffcf3f, 0 8px 16px rgba(0,0,0,.45), 0 0 18px rgba(255,207,63,.55);
+  z-index: 2;
+}
+/* 报听后：打这张就能听牌 → 上移发金光（仍要两次点击才打出） */
+.tile.ting-pick {
+  transform: translateY(-8px);
+  box-shadow: 0 0 0 2px rgba(255,214,64,.95), 0 4px 10px rgba(0,0,0,.4), 0 0 14px rgba(255,193,7,.55);
+}
+.tile.ting-pick.armed { transform: translateY(-16px) !important; }
 
 /* ---------- 自己手牌 ---------- */
 .self { padding: 4px 6px; }
@@ -330,6 +343,26 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
 /* 副露分组与金坎空位 */
 .meld-group { display: inline-flex; margin-right: 5px; }
 .meld-group .melds { margin-top: 0; }
+/* 杠过的副露：金色细描边 + 「杠」角标（别人的暗杠是 4 张背面，不标就看不出杠过） */
+.meld-group.meld-gang { position: relative; margin-top: 7px; outline: 1px solid rgba(255,207,63,.5); outline-offset: 2px; border-radius: 6px; }
+.meld-group.meld-gang::after {
+  content: '杠'; position: absolute; left: -4px; top: -9px;
+  font-size: 9px; font-weight: 700; line-height: 1.5; color: #4a3000;
+  background: #ffcf3f; border-radius: 4px; padding: 0 3px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.4);
+}
+/* v14：点副露看"这张是谁喂的" */
+.meld-clickable { cursor: pointer; border-radius: 5px; }
+.meld-clickable.active { outline: 2px solid rgba(255,207,63,.95); outline-offset: 2px; background: rgba(255,207,63,.12); }
+.meld-tip {
+  position: fixed; right: 8px; bottom: 56px; z-index: 28;
+  max-width: min(340px, 84vw);
+  background: rgba(6,40,26,.94); color: #fff;
+  border: 1px solid rgba(255,207,63,.55); border-radius: 10px;
+  padding: 7px 11px; font-size: 12px; line-height: 1.45;
+  box-shadow: 0 6px 18px rgba(0,0,0,.5);
+}
+.meld-tip[hidden] { display: none; }
 .tile.jin-gap {
   display: flex; align-items: center; justify-content: center;
   background: rgba(255,255,255,.06);
@@ -366,10 +399,14 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
   transition: transform .12s ease, background .2s ease;
 }
 .social-btn:active { transform: scale(.9); }
+.social-btn[hidden] { display: none; }   /* hidden 属性会被 display:flex 盖掉，得显式写一条 */
 .social-btn.mute { font-size: 17px; opacity: .9; }
 .social-btn.voice { font-size: 13px; font-weight: 700; letter-spacing: 0; font-family: inherit; }
 .social-btn.off { opacity: .55; }
 .social-btn.bad { color: #ff7b7b; border-color: rgba(255,123,123,.55); }   /* 语音包没加载出来 */
+/* v13 代打：开启时金色实心，一眼看出现在是机器人在打 */
+.social-btn.auto { font-size: 14px; font-weight: 700; font-family: inherit; }
+.social-btn.auto.on { background: #ffcf3f; color: #3a2a00; border-color: #ffe9a8; box-shadow: 0 0 0 2px rgba(255,207,63,.35), 0 2px 8px rgba(0,0,0,.35); }
 .social-btn.shake { animation: socialShake .3s ease; }
 @keyframes socialShake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-3px)} 75%{transform:translateX(3px)} }
 
@@ -623,3 +660,48 @@ html, body { height: 100%; font-family: -apple-system, "PingFang SC", "Microsoft
   .rule-h { padding: 9px 11px; font-size: 13px; }
   .rule-c { font-size: 12.5px; line-height: 1.65; }
 }
+
+/* ============================================================
+   v13：账号 / 自动代打 / 断线重连
+   ============================================================ */
+/* 大厅的账号条 */
+.acct { display: flex; align-items: center; gap: 8px; justify-content: center; margin: -4px 0 10px; min-height: 26px; }
+.acct .acct-btn {
+  width: auto; flex: 0 0 auto; padding: 5px 13px; font-size: 12.5px; line-height: 1.4;
+  border-radius: 999px; color: #fff;
+  border: 1px solid rgba(255,255,255,.4); background: rgba(0,0,0,.18);
+}
+.acct-btn:active { transform: scale(.96); }
+.acct-info { font-size: 11px; opacity: .65; white-space: nowrap; }
+.acct .acct-out { width: auto; flex: 0 0 auto; padding: 4px 10px; font-size: 11px; border-radius: 999px; color: #d9f5e6; border: 1px solid rgba(255,255,255,.25); background: transparent; }
+
+/* 账号弹窗：大厅里打开，要 fixed 才不会被 card 的定位限制 */
+.auth-overlay { position: fixed; z-index: 40; }
+.auth-modal { max-width: 330px; }
+.auth-tip { font-size: 12px; line-height: 1.6; opacity: .72; margin: -6px 0 12px; }
+.auth-modal input { width: 100%; margin-bottom: 8px; }
+.auth-row { display: flex; gap: 8px; margin-top: 4px; }
+.auth-row button { flex: 1; padding: 11px 0; border-radius: 10px; font-size: 15px; }
+.auth-row #authReg { border: 1px solid rgba(255,255,255,.4); background: transparent; color: #fff; }
+.auth-modal #authMsg { min-height: 18px; margin: 8px 0 4px; font-size: 12px; }
+
+/* 断线重连提示条 */
+.net-bar {
+  position: fixed; top: 5px; left: 50%; transform: translateX(-50%); z-index: 60;
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 6px 14px; font-size: 12px; color: #fff; white-space: nowrap;
+  border-radius: 999px; border: 1px solid rgba(255,255,255,.28);
+  background: #a4321f; box-shadow: 0 6px 18px rgba(0,0,0,.45);
+}
+.net-bar[hidden] { display: none; }
+body.net-warn { padding-top: 30px; }   /* 提示条占一条，牌桌整体下移，别糊在顶栏上 */
+.net-bar .nb-dot { width: 7px; height: 7px; border-radius: 50%; background: #ffe08a; animation: nbPulse 1s infinite; }
+@keyframes nbPulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+/* 代打标记：挂在玩家名后面 */
+.auto-flag {
+  font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 5px;
+  background: rgba(255,207,63,.92); color: #3a2a00; white-space: nowrap;
+}
+.auto-flag.offline { background: rgba(255,122,102,.95); color: #fff; }
+.act-auto { opacity: .95; }

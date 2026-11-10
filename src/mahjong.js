@@ -83,112 +83,109 @@ function separateJokers(tiles, jokerTile) {
 
 // ---------- 胡牌分解（含金） ----------
 // 把剩余牌分解成 need 个面子（刻子/顺子），金作百搭，不含将。
+//
+// 为什么必须穷举：一手牌经常有不止一种拆法。
+//   例：清一色 + 金雀的手，按「双金作将」是一种拆法，按「金去补顺子、只算混/清一色」
+//   是另一种；贪心只试第一条路，遇到第二条才成立的胡牌就会漏判 ——
+//   玩家看到的是「明明听了却胡不了 / 只能吃碰」。这里改成穷举 + 记忆化，
+//   保证只要存在合法拆法就一定找得到。
 function formMelds(counts, jokers, need) {
-  let i = 0;
-  while (i < NUMERAL && counts[i] === 0) i++;
-  if (i === NUMERAL) {
-    if (need === 0) return [];
-    if (jokers === 3 * need) {
-      const melds = [];
-      for (let k = 0; k < need; k++) melds.push({ type: 'ke', tiles: ['J', 'J', 'J'], joker: 3 });
-      return melds;
+  if (!Number.isInteger(need) || need < 0) return null;
+  const memo = new Map();
+  const key = (c, j, n) => c.join(',') + '|' + j + '|' + n;
+
+  function dfs(c, j, n) {
+    if (n === 0) return (j === 0 && c.every((x) => x === 0)) ? [] : null;
+    const k = key(c, j, n);
+    if (memo.has(k)) return memo.get(k);
+
+    let i = 0;
+    while (i < NUMERAL && c[i] === 0) i++;
+    if (i === NUMERAL) {
+      // 只剩金：三张金凑一坎
+      if (j === 3 * n) {
+        const out = [];
+        for (let q = 0; q < n; q++) out.push({ type: 'ke', tiles: ['J', 'J', 'J'], joker: 3 });
+        memo.set(k, out);
+        return out;
+      }
+      memo.set(k, null);
+      return null;
     }
+
+    // ① 以 i 为主的刻子
+    if (c[i] >= 3) {
+      c[i] -= 3;
+      const r = dfs(c, j, n - 1);
+      c[i] += 3;
+      if (r) { const out = [{ type: 'ke', tiles: [i, i, i], joker: 0 }, ...r]; memo.set(k, out); return out; }
+    }
+    if (c[i] >= 2 && j >= 1) {
+      c[i] -= 2;
+      const r = dfs(c, j - 1, n - 1);
+      c[i] += 2;
+      if (r) { const out = [{ type: 'ke', tiles: [i, i, 'J'], joker: 1 }, ...r]; memo.set(k, out); return out; }
+    }
+    if (c[i] >= 1 && j >= 2) {
+      c[i] -= 1;
+      const r = dfs(c, j - 2, n - 1);
+      c[i] += 1;
+      if (r) { const out = [{ type: 'ke', tiles: [i, 'J', 'J'], joker: 2 }, ...r]; memo.set(k, out); return out; }
+    }
+    if (j >= 3) {
+      const r = dfs(c, j - 3, n - 1);
+      if (r) { const out = [{ type: 'ke', tiles: ['J', 'J', 'J'], joker: 3 }, ...r]; memo.set(k, out); return out; }
+    }
+
+    // ② 顺子：i 是最低非零张，所以顺子起点只能是 i、i-1、i-2（低位空缺用金补）
+    for (let s = Math.max(0, i - 2); s <= i; s++) {
+      if (Math.floor(s / 9) !== Math.floor(i / 9)) continue; // 不跨花色
+      if ((s % 9) > 6) continue;
+      if (s + 2 < i) continue;                               // 必须用上 i
+      const used = [];
+      let jn = 0, ok = true;
+      for (const t of [s, s + 1, s + 2]) {
+        if (c[t] > 0) { c[t]--; used.push(t); }
+        else { used.push('J'); jn++; }
+      }
+      if (jn <= j) {
+        const r = dfs(c, j - jn, n - 1);
+        for (const t of used) if (t !== 'J') c[t]++;
+        if (r) { const out = [{ type: 'shun', tiles: used, joker: jn }, ...r]; memo.set(k, out); return out; }
+      } else {
+        for (const t of used) if (t !== 'J') c[t]++;
+      }
+    }
+    memo.set(k, null);
     return null;
   }
-  if (need === 0) return null;
 
-  // 刻子方向
-  if (counts[i] >= 3) {
-    counts[i] -= 3;
-    const r = formMelds(counts, jokers, need - 1);
-    counts[i] += 3;
-    if (r) return [{ type: 'ke', tiles: [i, i, i], joker: 0 }, ...r];
-  }
-  if (counts[i] >= 2 && jokers >= 1) {
-    counts[i] -= 2;
-    const r = formMelds(counts, jokers - 1, need - 1);
-    counts[i] += 2;
-    if (r) return [{ type: 'ke', tiles: [i, i, 'J'], joker: 1 }, ...r];
-  }
-  if (counts[i] >= 1 && jokers >= 2) {
-    counts[i] -= 1;
-    const r = formMelds(counts, jokers - 2, need - 1);
-    counts[i] += 1;
-    if (r) return [{ type: 'ke', tiles: [i, 'J', 'J'], joker: 2 }, ...r];
-  }
-  if (jokers >= 3) {
-    const r = formMelds(counts, jokers - 3, need - 1);
-    if (r) return [{ type: 'ke', tiles: ['J', 'J', 'J'], joker: 3 }, ...r];
-  }
-
-  // 顺子方向（数牌）
-  if (i < NUMERAL && (i % 9) <= 6) {
-    const a = i, b = i + 1, c = i + 2;
-    if (counts[a] >= 1 && counts[b] >= 1 && counts[c] >= 1) {
-      counts[a]--; counts[b]--; counts[c]--;
-      const r = formMelds(counts, jokers, need - 1);
-      counts[a]++; counts[b]++; counts[c]++;
-      if (r) return [{ type: 'shun', tiles: [a, b, c], joker: 0 }, ...r];
-    }
-    if (counts[a] >= 1 && counts[b] >= 1 && jokers >= 1) {
-      counts[a]--; counts[b]--;
-      const r = formMelds(counts, jokers - 1, need - 1);
-      counts[a]++; counts[b]++;
-      if (r) return [{ type: 'shun', tiles: [a, b, 'J'], joker: 1 }, ...r];
-    }
-    if (counts[a] >= 1 && counts[c] >= 1 && jokers >= 1) {
-      counts[a]--; counts[c]--;
-      const r = formMelds(counts, jokers - 1, need - 1);
-      counts[a]++; counts[c]++;
-      if (r) return [{ type: 'shun', tiles: [a, 'J', c], joker: 1 }, ...r];
-    }
-    if (counts[b] >= 1 && counts[c] >= 1 && jokers >= 1) {
-      counts[b]--; counts[c]--;
-      const r = formMelds(counts, jokers - 1, need - 1);
-      counts[b]++; counts[c]++;
-      if (r) return [{ type: 'shun', tiles: ['J', b, c], joker: 1 }, ...r];
-    }
-    if (counts[a] >= 1 && jokers >= 2) {
-      counts[a]--;
-      const r = formMelds(counts, jokers - 2, need - 1);
-      counts[a]++;
-      if (r) return [{ type: 'shun', tiles: [a, 'J', 'J'], joker: 2 }, ...r];
-    }
-    if (counts[b] >= 1 && jokers >= 2) {
-      counts[b]--;
-      const r = formMelds(counts, jokers - 2, need - 1);
-      counts[b]++;
-      if (r) return [{ type: 'shun', tiles: ['J', b, 'J'], joker: 2 }, ...r];
-    }
-    if (counts[c] >= 1 && jokers >= 2) {
-      counts[c]--;
-      const r = formMelds(counts, jokers - 2, need - 1);
-      counts[c]++;
-      if (r) return [{ type: 'shun', tiles: ['J', 'J', c], joker: 2 }, ...r];
-    }
-    if (jokers >= 3) {
-      const r = formMelds(counts, jokers - 3, need - 1);
-      if (r) return [{ type: 'shun', tiles: ['J', 'J', 'J'], joker: 3 }, ...r];
-    }
-  }
-  return null;
+  return dfs(counts, jokers, need);
 }
 
 // 按"恰好 need 个面子 + 1 将"分解，返回 {pair, melds} 或 null
+// 将的三种取法都要试：两张实牌 / 一张实牌+金 / 两张金。
 function decomposeNeed(counts, jokers, need) {
   if (!Number.isInteger(need) || need < 0 || need > 5) return null;
   const total = counts.reduce((a, b) => a + b, 0) + jokers;
   if (total !== need * 3 + 2) return null;
   for (let i = 0; i < NUMERAL; i++) {
-    const c = counts.slice();
-    let j = jokers;
-    let pair;
-    if (c[i] >= 2) { c[i] -= 2; pair = { tile: i, joker: 0 }; }
-    else if (c[i] >= 1 && j >= 1) { c[i] -= 1; j -= 1; pair = { tile: i, joker: 1 }; }
-    else if (j >= 2) { j -= 2; pair = { tile: 'J', joker: 2 }; }
-    else continue;
-    const melds = formMelds(c, j, need);
-    if (melds) return { pair, melds };
+    if (counts[i] >= 2) {
+      const c = counts.slice();
+      c[i] -= 2;
+      const melds = formMelds(c, jokers, need);
+      if (melds) return { pair: { tile: i, joker: 0 }, melds };
+    }
+    if (counts[i] >= 1 && jokers >= 1) {
+      const c = counts.slice();
+      c[i] -= 1;
+      const melds = formMelds(c, jokers - 1, need);
+      if (melds) return { pair: { tile: i, joker: 1 }, melds };
+    }
+  }
+  if (jokers >= 2) {
+    const melds = formMelds(counts.slice(), jokers - 2, need);
+    if (melds) return { pair: { tile: 'J', joker: 2 }, melds };
   }
   return null;
 }

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="福麻大乱斗" />
-  <title>福麻大乱斗学习模拟器 v11</title>
+  <title>福麻大乱斗学习模拟器 v14</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
   <link rel="stylesheet" href="style.css" />
@@ -22,12 +22,12 @@
         </svg>
         <span>规则</span>
       </button>
-      <h1 class="logo"><span>福麻大乱斗</span><em>学习模拟器 <b class="ver" id="appVer">v12</b></em></h1>
+      <h1 class="logo"><span>福麻大乱斗</span><em>学习模拟器 <b class="ver" id="appVer">v14</b></em></h1>
       <p class="sub">四人联机 · 金百搭 · 花即分</p>
-      <input id="nameInput" placeholder="你的昵称" maxlength="8" />
+      <input id="nameInput" placeholder="昵称（不填就叫玩家1/2/3/4）" maxlength="10" />
       <button id="createBtn" class="primary">创建房间</button>
       <div class="divider"><span>或</span></div>
-      <input id="roomInput" placeholder="输入房间码" maxlength="4" />
+      <input id="roomInput" placeholder="输入房间码（掉线后用同一昵称重进即可重连）" maxlength="4" />
       <button id="joinBtn">加入房间</button>
       <p id="lobbyMsg" class="msg"></p>
     </div>
@@ -66,6 +66,7 @@
 
     <!-- v11：快捷表情（按钮挂在操作栏右侧，面板向上弹出） -->
     <div class="social" id="social">
+      <button id="autoBtn" class="social-btn auto" aria-label="机器人代打" title="机器人代打">代</button>
       <button id="emojiBtn" class="social-btn" aria-label="快捷表情" title="快捷表情">😀</button>
       <button id="muteBtn" class="social-btn mute" aria-label="音效开关" title="音效开关">🔊</button>
       <button id="voiceBtn" class="social-btn mute voice" aria-label="报牌语音" title="报牌语音">语</button>
@@ -77,6 +78,8 @@
     </div>
     <div id="emojiLayer" class="emoji-layer"></div>
     <div id="fxLayer" class="fx-layer"></div>
+    <!-- 点副露时在右下角显示"这张牌是谁喂的" -->
+    <div id="meldTip" class="meld-tip" hidden></div>
 
     <!-- 等待面板: 开始 -->
     <div id="waitingPanel" class="overlay">
@@ -129,6 +132,9 @@
       <div id="rulesBody" class="rules-body"></div>
     </div>
   </div>
+
+  <!-- 断线重连提示 -->
+  <div id="netBar" class="net-bar" hidden><span class="nb-dot"></span><span id="netText">连接已断开，正在重连…</span></div>
 
   <!-- 竖屏提示（仅竖屏显示，横屏自动隐藏） -->
   <div id="rotateHint"><div><div class="rh-ico">↻</div>请横屏游玩<br><small>福麻大乱斗学习模拟器 · 手机横放体验更佳</small><br><button id="rotateGo">继续用竖屏</button></div></div>

@@ -13,7 +13,7 @@ SAMPLES = [
     ('zh-CN-YunxiNeural', '云希 · 年轻男声'),
     ('zh-CN-YunjianNeural', '云健 · 激情解说男声'),
 ]
-SENTENCE = '三饼，碰！清一色，自摸！'
+SENTENCE = '三筒，碰！清一色，自摸！'
 
 GROUPS = [
     ('数牌 · 万', ['1m', '2m', '3m', '4m', '5m', '6m', '7m', '8m', '9m']),

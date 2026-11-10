@@ -1,11 +1,12 @@
 /**
  * 包牌分摊测试（清/混一色）
  *
- * 规则口径（与玩家确认过）：
- *   - 只有清一色 / 混一色才可能包牌，且要有来源的副露 ≥ 3 手
+ * 规则口径（v14 调整，与玩家确认过）：
+ *   - 只有清一色 / 混一色才可能包牌，且要有来源的副露 ≥ 4 手
+ *   - 吃碰 3 手是清/混一色的常态，不包，三家各付一份
  *   - 先看"最后一手是谁喂的"，再看这个人一共喂了几手
- *   - 自摸：这个人喂满 3 手 → 付一半；喂满 4 手 → 全包
- *   - 点炮：喂牌的人在 3 手时照常付 1/4，不额外承担；4 手全同一人且不是放炮者时才分担一半
+ *   - 自摸：4 手最后一手的人付一半；4 手全是同一人 → 全包
+ *   - 点炮：4 手全同一人且不是放炮者时两人各半；否则放炮者全包
  *   - 总额恒为 3 倍单份，任何分支都不许凭空多收
  */
 const { Room } = require('../src/game.js');
@@ -48,6 +49,7 @@ function ron(providers, fromSeat, melds = MELDS, hand = [5, 6, 7, 6, 7, 8, 8], w
   B.hand = hand.slice();
   B.providers = providers.slice();
   B.eatPongCount = providers.length;
+  B.declaredTing = true;   // 清/混一色满 3 手要先报听（v14）
   const C = r.getPlayer(fromSeat);
   C.hand = [winTile, 20, 21, 22, 24];
   const d = r.discard(fromSeat, winTile);
@@ -65,6 +67,7 @@ function zimo(providers, melds = MELDS, hand = [5, 6, 7, 6, 7, 8, 8, 8], winTile
   B.hand = hand.slice();
   B.providers = providers.slice();
   B.eatPongCount = providers.length;
+  B.declaredTing = true;   // 清/混一色满 3 手要先报听（v14）
   B.lastDrawn = winTile;
   const h = r.selfHu(1);
   if (!h || h.ok === false) throw new Error('自摸失败: ' + JSON.stringify(h));
@@ -96,12 +99,12 @@ function checkBalance(w, label) {
 
 // ---------- 点炮 ----------
 {
-  // A 喂 3 手，C 放炮 → C 一半，A 与无关的 D 各 1/4（喂牌人在点炮时不额外承担）
+  // A 喂 3 手，C 放炮 → v14：3 手不包，三家各付一份
   const w = ron([0, 0, 0], 2);
   const f = w.fan;
-  eq(amt(w, 2), f * 1.5, '点炮 3 手全 A：放炮者付一半');
-  eq(amt(w, 0), f * 0.75, '点炮 3 手全 A：喂牌者只付 1/4');
-  eq(amt(w, 3), f * 0.75, '点炮 3 手全 A：无关者付 1/4');
+  eq(amt(w, 2), f, '点炮 3 手全 A：放炮者付一份');
+  eq(amt(w, 0), f, '点炮 3 手全 A：喂牌者付一份');
+  eq(amt(w, 3), f, '点炮 3 手全 A：无关者付一份');
   checkBalance(w, '点炮 3 手全 A');
 }
 
@@ -137,22 +140,22 @@ function checkBalance(w, label) {
 
 // ---------- 自摸 ----------
 {
-  // 3 手全 A 喂 → A 一半，其余各 1/4
+  // 3 手全 A 喂 → v14：3 手不包，三家各付一份
   const w = zimo([0, 0, 0]);
   const f = w.fan;
-  eq(amt(w, 0), f * 1.5, '自摸 3 手全 A：喂牌者包一半');
-  eq(amt(w, 2), f * 0.75, '自摸 3 手全 A：另一家 1/4');
-  eq(amt(w, 3), f * 0.75, '自摸 3 手全 A：第三家 1/4');
+  eq(amt(w, 0), f, '自摸 3 手全 A：喂牌者付一份');
+  eq(amt(w, 2), f, '自摸 3 手全 A：另一家一份');
+  eq(amt(w, 3), f, '自摸 3 手全 A：第三家一份');
   checkBalance(w, '自摸 3 手全 A');
 }
 
 {
-  // 3 手来自三家 → 喂第 3 手的人一半
+  // 3 手来自三家 → v14：3 手不包，三家各付一份
   const w = zimo([0, 3, 2]);
   const f = w.fan;
-  eq(amt(w, 2), f * 1.5, '自摸 3 手不同人：喂最后一手的人包一半');
-  eq(amt(w, 0), f * 0.75, '自摸 3 手不同人：第一家 1/4');
-  eq(amt(w, 3), f * 0.75, '自摸 3 手不同人：第二家 1/4');
+  eq(amt(w, 2), f, '自摸 3 手不同人：第三家付一份');
+  eq(amt(w, 0), f, '自摸 3 手不同人：第一家付一份');
+  eq(amt(w, 3), f, '自摸 3 手不同人：第二家付一份');
   checkBalance(w, '自摸 3 手不同人');
 }
 
@@ -189,10 +192,10 @@ function checkBalance(w, label) {
 {
   const r = setup(1);
   const w = r.getPlayer(1);
-  w.providers = [0, 0];
-  // 清一色但只有 2 手：不触发
+  w.providers = [0, 0, 0];
+  // 清一色但有 3 手：v14 起不触发
   const pay = r.spreadDaluan(50, true, null, true, w);
-  ok(pay.length === 3 && pay.every((x) => x.amount === 50), '不足 3 手不包：三家各付 50');
+  ok(pay.length === 3 && pay.every((x) => x.amount === 50), '只有 3 手不包：三家各付 50');
 }
 
 // ---------- 5 组副露：最后一手必须取数组末位，不能写死 provs[3] ----------
@@ -222,6 +225,28 @@ function checkBalance(w, label) {
   eq(amt(w, 0), f * 1.5, '5 手全 A + C 放炮：喂牌者一半');
   eq(amt(w, 3), 0, '5 手全 A + C 放炮：第三人不出');
   checkBalance(w, '5 手全 A + C 放炮');
+}
+
+// ---------- 杠不算"喂牌手数"：3 手吃碰 + 杠 + 自摸，仍然三家各付 ----------
+{
+  const r = setup(1);
+  const B = r.getPlayer(1);
+  B.melds = [
+    { type: 'chi', tiles: [0, 1, 2], from: 0 },
+    { type: 'chi', tiles: [1, 2, 3], from: 0 },
+    { type: 'peng', tiles: [8, 8, 8], from: 0 },
+  ];
+  B.providers = [0, 0, 0];
+  B.eatPongCount = 3;
+  B.hand = [5, 6, 7, 6, 7, 9, 9, 8];      // 3n+2 张，含第 4 张 8 → 加杠
+  B.lastDrawn = 8;
+  r.wall = r.wall.concat([9, 9, 9, 9, 9]); // 保证杠后补得到牌
+
+  const g = r.buGang(1, 8);
+  ok(g && g.ok !== false, '（前提）3 手吃碰后加杠成功', JSON.stringify(g));
+  eq(B.providers.length, 3, '加杠不增加"喂牌手数"（还是 3 手）');
+  eq(B.eatPongCount, 3, '加杠不增加吃碰计数');
+  ok(B.melds.some((m) => m.type === 'gang' && m.bugang === true), '碰升级成明杠（bugang 标记）');
 }
 
 // ---------- 分数累计必须与账单一致 ----------

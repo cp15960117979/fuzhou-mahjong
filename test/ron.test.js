@@ -101,8 +101,9 @@ function room(joker) {
   p.hand = [21, 22, 8, 24]; // 21 22 + 金(当 23) 成顺子，24 单钓将
   p.flowerCount = 5;
   p.eatPongCount = 4;
+  p.declaredTing = true;   // 清/混一色吃碰满 3 手，要先报听才能胡（v14）
   ok(r.fullTiles(p).length === 16, '（前提）4 副露 + 4 张手牌 = 16 张听牌', r.fullTiles(p).length);
-  ok(r.canRon(p, 24) === true, '4 副露 + 金 + 混一色 → 可以点炮', JSON.stringify(MJ.winLabels(r.fullTiles(p).concat([24]), 8)));
+  ok(r.canRon(p, 24) === true, '4 副露 + 金 + 混一色（已报听）→ 可以点炮', JSON.stringify(MJ.winLabels(r.fullTiles(p).concat([24]), 8)));
   ok(MJ.winLabels(r.fullTiles(p).concat([24]), 8).includes('混一色'), '这手确实是混一色');
 }
 
